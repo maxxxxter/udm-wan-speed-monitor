@@ -574,8 +574,8 @@ class MonitorApp:
         self.wan1_upload_var = tk.StringVar(value='--')
         self.wan2_download_var = tk.StringVar(value='--')
         self.wan2_upload_var = tk.StringVar(value='--')
-        self.wan1_ip_var = tk.StringVar(value='WAN 1   --')
-        self.wan2_ip_var = tk.StringVar(value='WAN 2   --')
+        self.wan1_ip_var = tk.StringVar(value='WAN 1   Ping --')
+        self.wan2_ip_var = tk.StringVar(value='WAN 2   Ping --')
         self.footer_var = tk.StringVar(value=f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
 
         self.host_var = tk.StringVar(value=self.config.get('host', ''))
@@ -763,7 +763,7 @@ class MonitorApp:
             self.content.columnconfigure(1, weight=0)
             self.wan2_download_var.set('--')
             self.wan2_upload_var.set('--')
-            self.wan2_ip_var.set('WAN 2   --')
+            self.wan2_ip_var.set('WAN 2   Ping --')
         self._layout_graphs()
 
     def _autostart_command(self) -> str:
@@ -969,7 +969,7 @@ class MonitorApp:
             upload_panel.add_point(reading.timestamp, reading.upload_bps, redraw=False)
             dirty_panels.add(download_panel)
             dirty_panels.add(upload_panel)
-            ip_var.set(f"{reading.name}   {reading.ping_ms or '--'}")
+            ip_var.set(f"{reading.name}   Ping {reading.ping_ms or '--'}")
             seen.add(reading.name)
         for name, slot in slots.items():
             if name in seen:
@@ -977,7 +977,7 @@ class MonitorApp:
             download_var, upload_var, _, _, ip_var = slot
             download_var.set('--')
             upload_var.set('--')
-            ip_var.set(f"{name}   --")
+            ip_var.set(f"{name}   Ping --")
         for panel in dirty_panels:
             panel.redraw()
         self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
@@ -987,8 +987,8 @@ class MonitorApp:
         self.wan1_upload_var.set('--')
         self.wan2_download_var.set('--')
         self.wan2_upload_var.set('--')
-        self.wan1_ip_var.set('WAN 1   --')
-        self.wan2_ip_var.set('WAN 2   --')
+        self.wan1_ip_var.set('WAN 1   Ping --')
+        self.wan2_ip_var.set('WAN 2   Ping --')
         self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
         self.running = False
         if self.client is not None:
