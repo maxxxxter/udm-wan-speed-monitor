@@ -5,6 +5,8 @@
 
 Desktop-App fuer Windows, die den aktuellen WAN-Downlink und Uplink deiner UDM Pro Max anzeigt.
 
+![UDM WAN Speed Monitor Screenshot](assets/UDM%20WAN%20Speed%20Monitor.png)
+
 ## Features
 
 - Dark Theme
