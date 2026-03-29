@@ -1,6 +1,7 @@
 # UDM WAN Speed Monitor
 
-[![Download EXE](https://img.shields.io/badge/Download-UDM%20WAN%20Speed%20Monitor%201.0-00c853?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/maxxxxter/udm-wan-speed-monitor/raw/main/dist/udm-wan-speed-monitor-1.0.exe)
+[![Download MSI](https://img.shields.io/badge/Download-MSI%20Installer-00c853?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/maxxxxter/udm-wan-speed-monitor/raw/main/dist/UDM-WAN-Speed-Monitor-1.0.msi)
+[![Download EXE](https://img.shields.io/badge/Download-Portable%20EXE-0078d4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/maxxxxter/udm-wan-speed-monitor/raw/main/dist/udm-wan-speed-monitor-1.0.exe)
 
 Desktop-App fuer Windows, die den aktuellen WAN-Downlink und Uplink deiner UDM Pro Max anzeigt.
 
@@ -25,8 +26,20 @@ Desktop-App fuer Windows, die den aktuellen WAN-Downlink und Uplink deiner UDM P
 - `app.py`: Anwendung
 - `config.json`: wird unter `%LOCALAPPDATA%\UDM WAN Speed Monitor` automatisch angelegt
 - `run-udm-wan-speed-monitor.bat`: Starter fuer Windows
+- `build_release.ps1`: baut die Release-EXE
+- `build_installer.ps1`: baut den IExpress-Installer
+- `build_msi.ps1`: baut den klassischen MSI-Installer
+- `dist/UDM-WAN-Speed-Monitor-1.0.msi`: MSI-Installer fuer Windows
+- `dist/UDM-WAN-Speed-Monitor-Installer.exe`: IExpress-Installer fuer Windows
 
 
 ## Lizenz
 
 CC BY 4.0
+
+
+## Windows-Hinweise
+
+- Die EXE enthaelt jetzt saubere Windows-Dateiinformationen fuer Produktname, Version und Hersteller.
+- Fuer eine moeglichst warnfreie Ausfuehrung unter Windows 11 bleibt Code Signing der wichtigste naechste Schritt.
+- Den Release-Build erzeugst du konsistent mit `build_release.ps1`.

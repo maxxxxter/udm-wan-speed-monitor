@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="UDM WAN Speed Monitor"
+    Language="1033"
+    Version="1.0.0"
+    Manufacturer="Maxxter"
+    UpgradeCode="AF536E61-D31B-43E3-BE84-9AB233D2F401">
+    <Package
+      InstallerVersion="500"
+      Compressed="yes"
+      InstallScope="perUser"
+      InstallPrivileges="limited"
+      Description="UDM WAN Speed Monitor"
+      Manufacturer="Maxxter" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of UDM WAN Speed Monitor is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/maxxxxter/udm-wan-speed-monitor" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/maxxxxter/udm-wan-speed-monitor" />
+
+    <Icon Id="AppIcon" SourceFile="..\udm-wan-speed-monitor-v2.ico" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="CompanyDir" Name="Maxxter">
+          <Directory Id="INSTALLDIR" Name="UDM WAN Speed Monitor" />
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ProgramMenuDir" Name="Maxxter" />
+      </Directory>
+      <Directory Id="DesktopFolder" />
+    </Directory>
+
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="MainExecutableComponent" Guid="A53E61D2-EAB2-4D32-8B6C-11CCB5B5CC01">
+        <File Id="MainExecutable" Source="..\dist\udm-wan-speed-monitor-1.0.exe" />
+        <RegistryValue Root="HKCU" Key="Software\Maxxter\UDM WAN Speed Monitor" Name="ExeInstalled" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <Component Id="IconComponent" Guid="B7D43C8B-6444-441E-9518-8C5BEEBBE102">
+        <File Id="AppIconFile" Source="..\udm-wan-speed-monitor-v2.ico" />
+        <RegistryValue Root="HKCU" Key="Software\Maxxter\UDM WAN Speed Monitor" Name="IconInstalled" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <Component Id="RegistryComponent" Guid="C6A41B4E-A60A-4A0B-AC04-E6168E37F203">
+        <RegistryValue Root="HKCU" Key="Software\Maxxter\UDM WAN Speed Monitor" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+
+      <Component Id="InstallDirCleanupComponent" Guid="F52A1E8F-83F1-4D0A-A1C2-137D3B452306">
+        <RemoveFile Id="RemoveInstallDirFiles" Name="*.*" On="uninstall" />
+        <RemoveFolder Id="RemoveInstallDirFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Maxxter\UDM WAN Speed Monitor" Name="Cleanup" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="CompanyDir">
+      <Component Id="CompanyDirCleanupComponent" Guid="0A0F5D15-7B69-4585-9F1D-E07A95E35507">
+        <RemoveFolder Id="RemoveCompanyDirFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Maxxter\UDM WAN Speed Monitor" Name="CompanyDirCleanup" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ProgramMenuDir">
+      <Component Id="ProgramMenuShortcutComponent" Guid="D9702A4D-7812-4F7C-9CF4-6FBA6B8D8204">
+        <Shortcut
+          Id="StartMenuShortcut"
+          Name="UDM WAN Speed Monitor"
+          Description="UDM WAN Speed Monitor"
+          Target="[INSTALLDIR]udm-wan-speed-monitor-1.0.exe"
+          WorkingDirectory="INSTALLDIR"
+          Icon="AppIcon"
+          IconIndex="0" />
+        <RemoveFolder Id="RemoveProgramMenuDir" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Maxxter\UDM WAN Speed Monitor\Shortcuts" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="DesktopFolder">
+      <Component Id="DesktopShortcutComponent" Guid="E2C61F7D-6A88-4EF2-888F-8934E2491205">
+        <Shortcut
+          Id="DesktopShortcut"
+          Name="UDM WAN Speed Monitor"
+          Description="UDM WAN Speed Monitor"
+          Target="[INSTALLDIR]udm-wan-speed-monitor-1.0.exe"
+          WorkingDirectory="INSTALLDIR"
+          Icon="AppIcon"
+          IconIndex="0" />
+        <RegistryValue Root="HKCU" Key="Software\Maxxter\UDM WAN Speed Monitor\Shortcuts" Name="Desktop" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="MainFeature" Title="UDM WAN Speed Monitor" Level="1">
+      <ComponentRef Id="MainExecutableComponent" />
+      <ComponentRef Id="IconComponent" />
+      <ComponentRef Id="RegistryComponent" />
+      <ComponentRef Id="InstallDirCleanupComponent" />
+      <ComponentRef Id="CompanyDirCleanupComponent" />
+      <ComponentRef Id="ProgramMenuShortcutComponent" />
+      <ComponentRef Id="DesktopShortcutComponent" />
+    </Feature>
+
+    <UIRef Id="WixUI_Minimal" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+  </Product>
+</Wix>
