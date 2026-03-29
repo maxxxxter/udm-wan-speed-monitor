@@ -13,3 +13,6 @@ dist/*
 .venv/
 config.json
 *.log
+installer/payload/
+*.wixobj
+*.wixpdb
