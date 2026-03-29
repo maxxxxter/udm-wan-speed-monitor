@@ -36,7 +36,7 @@ ICON_CANDIDATES = [
     RUNTIME_DIR / 'udm-wan-speed-monitor.ico',
     APP_DIR / 'udm-wan-speed-monitor.ico',
 ]
-HISTORY_WINDOW_SECONDS = 120
+HISTORY_WINDOW_SECONDS = 300
 DEFAULT_POLL_SECONDS = 2.0
 MIN_WIDTH = 220
 MIN_HEIGHT = 120
@@ -471,7 +471,7 @@ class GraphPanel(tk.Frame):
         self.value_label.pack(anchor='w', padx=10, pady=(4, 4))
         self.canvas = tk.Canvas(self, bg=CANVAS_BG, highlightthickness=0)
         self.canvas.pack(fill='both', expand=True, padx=10)
-        self.info_label = tk.Label(self, text='Verlauf der letzten 2 Minuten', fg='#6d7f98', bg=CARD)
+        self.info_label = tk.Label(self, text='Verlauf der letzten 5 Minuten', fg='#6d7f98', bg=CARD)
         self.info_label.pack(anchor='w', padx=10, pady=(4, 6))
         self.update_scale(1.0)
 
