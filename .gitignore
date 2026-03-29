@@ -7,6 +7,7 @@ dist/*
 !dist/udm-wan-speed-monitor-1.0.exe
 !dist/UDM-WAN-Speed-Monitor-1.0.msi
 !dist/UDM-WAN-Speed-Monitor-Installer.exe
+!dist/SHA256SUMS.txt
 *.rar
 *.spec
 .env

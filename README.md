@@ -29,8 +29,11 @@ Desktop-App fuer Windows, die den aktuellen WAN-Downlink und Uplink deiner UDM P
 - `build_release.ps1`: baut die Release-EXE
 - `build_installer.ps1`: baut den IExpress-Installer
 - `build_msi.ps1`: baut den klassischen MSI-Installer
+- `sign_release.ps1`: signiert EXE und MSI mit signtool.exe
 - `dist/UDM-WAN-Speed-Monitor-1.0.msi`: MSI-Installer fuer Windows
 - `dist/UDM-WAN-Speed-Monitor-Installer.exe`: IExpress-Installer fuer Windows
+- `generate_checksums.ps1`: erzeugt SHA256-Pruefsummen fuer die Releases
+- `dist/SHA256SUMS.txt`: SHA256-Pruefsummen der Release-Dateien
 
 
 ## Lizenz
@@ -43,3 +46,15 @@ CC BY 4.0
 - Die EXE enthaelt jetzt saubere Windows-Dateiinformationen fuer Produktname, Version und Hersteller.
 - Fuer eine moeglichst warnfreie Ausfuehrung unter Windows 11 bleibt Code Signing der wichtigste naechste Schritt.
 - Den Release-Build erzeugst du konsistent mit `build_release.ps1`.
+
+
+## Integritaetspruefung
+
+- Lade nach Moeglichkeit den MSI-Installer statt der losen EXE.
+- Vergleiche die SHA256-Pruefsumme deiner Datei mit `dist/SHA256SUMS.txt`.
+- Unter Windows kannst du das lokal so pruefen:
+
+```powershell
+Get-FileHash .\UDM-WAN-Speed-Monitor-1.0.msi -Algorithm SHA256
+Get-FileHash .\udm-wan-speed-monitor-1.0.exe -Algorithm SHA256
+```
