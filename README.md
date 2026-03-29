@@ -1,4 +1,6 @@
-﻿# UDM WAN Speed Monitor
+# UDM WAN Speed Monitor
+
+[![Download EXE](https://img.shields.io/badge/Download-UDM%20WAN%20Speed%20Monitor%201.0-00c853?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/maxxxxter/udm-wan-speed-monitor/raw/main/dist/udm-wan-speed-monitor-1.0.exe)
 
 Desktop-App fuer Windows, die den aktuellen WAN-Downlink und Uplink deiner UDM Pro Max anzeigt.
 
