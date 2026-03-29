@@ -1,4 +1,5 @@
 ﻿import ctypes
+import ipaddress
 import json
 import os
 import ssl
@@ -57,6 +58,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     'always_on_top': False,
     'show_wan2': False,
     'autostart': False,
+    'minimize_to_tray': True,
 }
 
 STARTUP_DIR = Path(os.environ.get('APPDATA', str(Path.home()))) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs' / 'Startup'
@@ -82,6 +84,7 @@ class WanReading:
     upload_bps: float
     source: str
     timestamp: float
+    external_ip: str = '--'
 
 
 @dataclass
@@ -132,6 +135,7 @@ class ConfigStore:
             'always_on_top': bool(config.get('always_on_top', False)),
             'show_wan2': bool(config.get('show_wan2', False)),
             'autostart': bool(config.get('autostart', False)),
+            'minimize_to_tray': bool(config.get('minimize_to_tray', True)),
             'password_encrypted': '',
         }
         if data['remember_password'] and config.get('password'):
@@ -201,12 +205,11 @@ class UdmClient:
         device_payload = self._get_json('/proxy/network/api/s/default/stat/device')
         sysinfo_payload = self._get_json('/proxy/network/api/s/default/stat/sysinfo')
 
-        readings = self._parse_health(health_payload)
-        if not readings:
-            fallback = self._parse_devices(device_payload)
-            if not fallback:
-                fallback = self._parse_sysinfo(sysinfo_payload)
-            readings = fallback
+        readings: list[WanReading] = []
+        readings.extend(self._parse_health(health_payload))
+        readings.extend(self._parse_devices(device_payload))
+        readings.extend(self._parse_sysinfo(sysinfo_payload))
+        readings = self._dedupe_readings(readings)
         if not readings:
             raise UdmApiError('Keine WAN-Durchsatzdaten gefunden.')
         return WanSnapshot(readings=self._normalize_wan_names(readings))
@@ -238,83 +241,168 @@ class UdmClient:
 
     def _parse_health(self, payload: Any) -> list[WanReading]:
         readings: list[WanReading] = []
-        for index, item in enumerate(payload.get('data', []) if isinstance(payload, dict) else [], start=1):
+        for item in payload.get('data', []) if isinstance(payload, dict) else []:
             if str(item.get('subsystem', '')).lower() != 'wan':
                 continue
-            reading = self._reading_from_object(item, 'stat/health', self._wan_name(item, index))
+            nested = self._extract_readings(item, 'stat/health')
+            if nested:
+                readings.extend(nested)
+                continue
+            reading = self._reading_from_object(item, 'stat/health', self._wan_name(item, len(readings) + 1))
             if reading is not None:
                 readings.append(reading)
-        return readings
+        return self._dedupe_readings(readings)
 
     def _parse_devices(self, payload: Any) -> list[WanReading]:
         readings: list[WanReading] = []
         for item in payload.get('data', []) if isinstance(payload, dict) else []:
-            for candidate in self._iter_objects(item):
-                role = str(candidate.get('role', '')).lower()
-                if role and 'wan' not in role:
-                    continue
-                reading = self._reading_from_object(candidate, 'stat/device', self._wan_name(candidate, len(readings) + 1))
-                if reading is not None:
-                    readings.append(reading)
+            readings.extend(self._extract_readings(item, 'stat/device'))
         return self._dedupe_readings(readings)
 
     def _parse_sysinfo(self, payload: Any) -> list[WanReading]:
         readings: list[WanReading] = []
         for item in payload.get('data', []) if isinstance(payload, dict) else []:
-            for candidate in self._iter_objects(item):
-                reading = self._reading_from_object(candidate, 'stat/sysinfo', self._wan_name(candidate, len(readings) + 1))
-                if reading is not None:
-                    readings.append(reading)
+            readings.extend(self._extract_readings(item, 'stat/sysinfo'))
         return self._dedupe_readings(readings)
 
-    def _iter_objects(self, value: Any):
-        stack = [value]
-        while stack:
-            current = stack.pop()
-            if isinstance(current, dict):
-                yield current
-                stack.extend(current.values())
-            elif isinstance(current, list):
-                stack.extend(current)
+    def _extract_readings(self, value: Any, source: str, path: tuple[str, ...] = ()) -> list[WanReading]:
+        readings: list[WanReading] = []
+        if isinstance(value, dict):
+            current_label = self._wan_label_from_context(value, path)
+            reading = self._reading_from_object(value, source, current_label) if current_label else None
+            if reading is not None:
+                readings.append(reading)
+            for key, child in value.items():
+                child_path = path + (str(key),)
+                readings.extend(self._extract_readings(child, source, child_path))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                readings.extend(self._extract_readings(child, source, path + (str(index),)))
+        return readings
 
-    def _reading_from_object(self, item: dict[str, Any], source: str, name: str) -> WanReading | None:
+    def _wan_label_from_context(self, item: dict[str, Any], path: tuple[str, ...]) -> str | None:
+        direct_candidates = [
+            item.get('wan_name'), item.get('name'), item.get('display_name'), item.get('ifname'), item.get('interface'),
+            item.get('port_name'), item.get('network'), item.get('role'), item.get('target'), item.get('key'),
+            item.get('uplink'), item.get('uplink_name'), item.get('link_name'), item.get('wan_role'), item.get('type'),
+        ]
+        for value in direct_candidates:
+            label = str(value).strip().lower() if value is not None else ''
+            compact = label.replace('_', '').replace(' ', '').replace('-', '')
+            if compact in {'wan1', 'internet1', 'uplink1'}:
+                return 'WAN 1'
+            if compact in {'wan2', 'internet2', 'uplink2'}:
+                return 'WAN 2'
+        if path:
+            tail = str(path[-1]).strip().lower().replace('_', '').replace(' ', '').replace('-', '')
+            if tail in {'wan1', 'internet1', 'uplink1'}:
+                return 'WAN 1'
+            if tail in {'wan2', 'internet2', 'uplink2'}:
+                return 'WAN 2'
+        return None
+
+    def _reading_from_object(self, item: dict[str, Any], source: str, name: str | None) -> WanReading | None:
         download = self._extract_rate(item, 'download')
         upload = self._extract_rate(item, 'upload')
+        external_ip = self._extract_external_ip(item, name)
         if download is None or upload is None:
-            return None
-        return WanReading(name, download, upload, source, time.time())
+            if name is None or external_ip in {'', '--'}:
+                return None
+            return WanReading(name, float(download or 0.0), float(upload or 0.0), source, time.time(), external_ip)
+        return WanReading(name, download, upload, source, time.time(), external_ip)
 
     def _wan_name(self, item: dict[str, Any], index: int) -> str:
-        candidates = [
-            item.get('wan_name'), item.get('name'), item.get('display_name'), item.get('ifname'),
-            item.get('interface'), item.get('port_name'), item.get('network'), item.get('subsystem'),
-        ]
-        for candidate in candidates:
-            label = str(candidate).strip() if candidate is not None else ''
-            if not label or label.lower() in {'wan', 'subsystem'}:
-                continue
-            upper = label.upper()
-            if 'WAN 2' in upper or upper == 'WAN2':
-                return 'WAN 2'
-            if 'WAN 1' in upper or upper == 'WAN1':
-                return 'WAN 1'
-            if 'WAN' in upper and any(ch.isdigit() for ch in upper):
-                return upper.replace('_', ' ')
-        return f'WAN {index}'
+        return self._wan_label_from_context(item, ()) or f'WAN {index}'
+
+    def _merge_readings(self, preferred: WanReading, other: WanReading) -> WanReading:
+        external_ip = preferred.external_ip
+        if self._ip_priority(other.external_ip) > self._ip_priority(external_ip):
+            external_ip = other.external_ip
+        return WanReading(preferred.name, preferred.download_bps, preferred.upload_bps, preferred.source, preferred.timestamp, external_ip)
 
     def _dedupe_readings(self, readings: list[WanReading]) -> list[WanReading]:
         deduped: dict[str, WanReading] = {}
         for reading in readings:
             current = deduped.get(reading.name)
-            if current is None or (reading.download_bps + reading.upload_bps) > (current.download_bps + current.upload_bps):
+            if current is None:
                 deduped[reading.name] = reading
+                continue
+            if (reading.download_bps + reading.upload_bps) > (current.download_bps + current.upload_bps):
+                deduped[reading.name] = self._merge_readings(reading, current)
+            else:
+                deduped[reading.name] = self._merge_readings(current, reading)
         return list(deduped.values())
 
     def _normalize_wan_names(self, readings: list[WanReading]) -> list[WanReading]:
+        explicit: dict[str, WanReading] = {}
+        fallback: list[WanReading] = []
+        for reading in readings:
+            if reading.name in {'WAN 1', 'WAN 2'}:
+                current = explicit.get(reading.name)
+                if current is None:
+                    explicit[reading.name] = reading
+                elif (reading.download_bps + reading.upload_bps) > (current.download_bps + current.upload_bps):
+                    explicit[reading.name] = self._merge_readings(reading, current)
+                else:
+                    explicit[reading.name] = self._merge_readings(current, reading)
+            else:
+                fallback.append(reading)
+
         normalized: list[WanReading] = []
-        for index, reading in enumerate(readings[:2], start=1):
-            normalized.append(WanReading(f'WAN {index}', reading.download_bps, reading.upload_bps, reading.source, reading.timestamp))
+        for index in (1, 2):
+            label = f'WAN {index}'
+            reading = explicit.get(label)
+            if reading is None and not explicit and fallback:
+                reading = fallback.pop(0)
+            if reading is None:
+                continue
+            normalized.append(WanReading(label, reading.download_bps, reading.upload_bps, reading.source, reading.timestamp, reading.external_ip))
         return normalized
+
+    def _extract_external_ip(self, item: dict[str, Any], name: str | None = None) -> str:
+        candidates = [
+            item.get('public_ip'), item.get('public_ip_address'), item.get('external_ip'),
+            item.get('wan_ip'), item.get('ipaddr'), item.get('ip_address'),
+        ]
+        if name in {'WAN 1', 'WAN 2'}:
+            candidates.extend([item.get('ip'), item.get('address'), item.get('addr')])
+        best = '--'
+        for value in candidates:
+            if self._ip_priority(value) > self._ip_priority(best):
+                best = str(value).strip()
+        for key, value in item.items():
+            lowered = str(key).lower()
+            if any(token in lowered for token in ['public', 'external', 'wan_ip', 'ipaddr', 'ip_address']) and all(token not in lowered for token in ['gateway', 'remote', 'dns']):
+                if self._ip_priority(value) > self._ip_priority(best):
+                    best = str(value).strip()
+        if name in {'WAN 1', 'WAN 2'}:
+            for key, value in item.items():
+                lowered = str(key).lower()
+                if lowered in {'ip', 'address', 'addr'} and self._ip_priority(value) > self._ip_priority(best):
+                    best = str(value).strip()
+        return best
+
+    def _ip_priority(self, value: Any) -> int:
+        if not self._looks_like_ip(value):
+            return 0
+        try:
+            ip = ipaddress.ip_address(str(value).strip())
+        except ValueError:
+            return 0
+        if getattr(ip, 'is_global', False):
+            return 3
+        if not any([ip.is_private, ip.is_loopback, ip.is_link_local, ip.is_multicast, ip.is_unspecified, ip.is_reserved]):
+            return 2
+        return 1
+
+    def _looks_like_ip(self, value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        raw = value.strip()
+        if raw.count('.') == 3:
+            parts = raw.split('.')
+            return all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
+        return ':' in raw and len(raw) >= 2
 
     def _extract_rate(self, item: dict[str, Any], direction: str) -> float | None:
         aliases = {
@@ -363,6 +451,7 @@ class GraphPanel(tk.Frame):
     def __init__(self, parent: tk.Widget, title: str, accent: str, value_var: tk.StringVar) -> None:
         super().__init__(parent, bg=CARD, highlightbackground=accent, highlightthickness=1)
         self.accent = accent
+        self.compact_mode = False
         self.history: deque[tuple[float, float]] = deque()
         self.title_label = tk.Label(self, text=title, fg=accent, bg=CARD)
         self.title_label.pack(anchor='w', padx=10, pady=(6, 0))
@@ -373,6 +462,22 @@ class GraphPanel(tk.Frame):
         self.info_label = tk.Label(self, text='Verlauf der letzten 2 Minuten', fg='#6d7f98', bg=CARD)
         self.info_label.pack(anchor='w', padx=10, pady=(4, 6))
         self.update_scale(1.0)
+
+    def set_compact(self, compact: bool) -> None:
+        if self.compact_mode == compact:
+            return
+        self.compact_mode = compact
+        if compact:
+            self.title_label.pack_forget()
+            self.canvas.pack_forget()
+            self.info_label.pack_forget()
+            self.value_label.pack_configure(anchor='center', padx=10, pady=(10, 10))
+        else:
+            self.title_label.pack(anchor='w', padx=10, pady=(6, 0), before=self.value_label)
+            self.value_label.pack_configure(anchor='w', padx=10, pady=(4, 4))
+            self.canvas.pack(fill='both', expand=True, padx=10)
+            self.info_label.pack(anchor='w', padx=10, pady=(4, 6))
+        self.redraw()
 
     def update_scale(self, scale: float) -> None:
         self.title_label.configure(font=('Consolas', max(8, int(12 * scale)), 'bold'))
@@ -429,6 +534,12 @@ class MonitorApp:
         self.tray_icon: pystray.Icon | None = None
         self.tray_thread: threading.Thread | None = None
         self.settings_window: tk.Toplevel | None = None
+        self.drag_offset_x = 0
+        self.drag_offset_y = 0
+        self.resize_start_x = 0
+        self.resize_start_y = 0
+        self.resize_start_width = BASE_WIDTH
+        self.resize_start_height = BASE_HEIGHT
         self.settings_open_in_tray = False
         self.in_tray = False
         self.exiting = False
@@ -437,6 +548,8 @@ class MonitorApp:
         self.wan1_upload_var = tk.StringVar(value='--')
         self.wan2_download_var = tk.StringVar(value='--')
         self.wan2_upload_var = tk.StringVar(value='--')
+        self.wan1_ip_var = tk.StringVar(value='WAN 1   --')
+        self.wan2_ip_var = tk.StringVar(value='WAN 2   --')
         self.footer_var = tk.StringVar(value=f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
 
         self.host_var = tk.StringVar(value=self.config.get('host', ''))
@@ -446,16 +559,17 @@ class MonitorApp:
         self.always_on_top_var = tk.BooleanVar(value=bool(self.config.get('always_on_top', False)))
         self.show_wan2_var = tk.BooleanVar(value=bool(self.config.get('show_wan2', False)))
         self.autostart_var = tk.BooleanVar(value=bool(self.config.get('autostart', False)))
+        self.minimize_to_tray_var = tk.BooleanVar(value=bool(self.config.get('minimize_to_tray', True)))
 
         self.scaled_widgets: list[tuple[tk.Widget, str, int, str]] = []
         self._build_ui()
+        self.root.overrideredirect(True)
         self.root.attributes('-topmost', self.always_on_top_var.get())
         self._apply_wan2_visibility()
         self._apply_autostart()
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
         self.root.bind('<Configure>', self._on_resize)
         self.root.bind('<Unmap>', self._on_unmap)
-        self.root.after(50, self._apply_title_bar_theme)
         self.root.after(150, self._bootstrap)
 
     def _icon_path(self) -> Path | None:
@@ -479,40 +593,69 @@ class MonitorApp:
             return True
 
     def _apply_title_bar_theme(self) -> None:
-        try:
-            hwnd = self.root.winfo_id()
-            dark_mode = 1 if self._windows_apps_dark_mode() else 0
-            dark_value = ctypes.c_int(dark_mode)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(dark_value), ctypes.sizeof(dark_value))
-            if dark_mode:
-                caption_color = ctypes.c_uint(0x00070C05)
-                text_color = ctypes.c_uint(0x00F0F4F8)
-            else:
-                caption_color = ctypes.c_uint(0x00E6EAEE)
-                text_color = ctypes.c_uint(0x00101418)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ctypes.byref(caption_color), ctypes.sizeof(caption_color))
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, ctypes.byref(text_color), ctypes.sizeof(text_color))
-        except Exception:
-            pass
+        return
 
-    def _build_menu(self) -> None:
-        menu_bar = tk.Menu(self.root, tearoff=False, bg='#111827', fg='#dbe8f7', activebackground='#1d3042', activeforeground=NEON_GREEN)
-        menu_bar.add_command(label='In Tray minimieren', command=self._hide_to_tray)
-        menu_bar.add_checkbutton(label='Immer im Vordergrund', variable=self.always_on_top_var, command=self.toggle_always_on_top)
-        menu_bar.add_command(label='Einstellungen', command=self.open_settings_window)
-        self.root.configure(menu=menu_bar)
+    def _start_window_drag(self, event) -> None:
+        self.drag_offset_x = event.x_root - self.root.winfo_x()
+        self.drag_offset_y = event.y_root - self.root.winfo_y()
 
+    def _drag_window(self, event) -> None:
+        x = event.x_root - self.drag_offset_x
+        y = event.y_root - self.drag_offset_y
+        self.root.geometry(f'+{x}+{y}')
+
+    def _start_window_resize(self, event) -> None:
+        self.resize_start_x = event.x_root
+        self.resize_start_y = event.y_root
+        self.resize_start_width = self.root.winfo_width()
+        self.resize_start_height = self.root.winfo_height()
+
+    def _resize_window(self, event) -> None:
+        width = max(MIN_WIDTH, self.resize_start_width + (event.x_root - self.resize_start_x))
+        height = max(MIN_HEIGHT, self.resize_start_height + (event.y_root - self.resize_start_y))
+        self.root.geometry(f'{width}x{height}')
 
     def _build_ui(self) -> None:
-        self._build_menu()
-
-        shell = tk.Frame(self.root, bg=BG)
-        shell.pack(fill='both', expand=True, padx=10, pady=10)
+        shell = tk.Frame(self.root, bg=BG, highlightbackground='#1f2937', highlightthickness=1)
+        shell.pack(fill='both', expand=True, padx=2, pady=2)
         shell.rowconfigure(1, weight=1)
         shell.columnconfigure(0, weight=1)
 
+        header = tk.Frame(shell, bg='#0b1118', height=32)
+        header.grid(row=0, column=0, sticky='ew')
+        header.columnconfigure(2, weight=1)
+        header.bind('<ButtonPress-1>', self._start_window_drag)
+        header.bind('<B1-Motion>', self._drag_window)
+
+        file_button = tk.Menubutton(header, text='Datei', bg='#0b1118', fg='#ffffff', activebackground='#182433', activeforeground='#ffffff', relief='flat', cursor='hand2')
+        file_menu = tk.Menu(file_button, tearoff=False, bg='#111827', fg='#ffffff', activebackground='#24405a', activeforeground='#ffffff', font=('Segoe UI', 14))
+        file_menu.add_command(label='Beenden', command=self._on_close)
+        file_button.configure(menu=file_menu)
+        file_button.grid(row=0, column=0, sticky='w', padx=(6, 2), pady=2)
+        self.scaled_widgets.append((file_button, 'Segoe UI', 14, 'normal'))
+
+        settings_button = tk.Button(header, text='Einstellungen', command=self.open_settings_window, bg='#0b1118', fg='#ffffff', activebackground='#182433', activeforeground='#ffffff', relief='flat', cursor='hand2')
+        settings_button.grid(row=0, column=1, sticky='w', padx=(2, 8), pady=2)
+        self.scaled_widgets.append((settings_button, 'Segoe UI', 14, 'normal'))
+
+        title_label = tk.Label(header, text='UDM WAN Speed Monitor', bg='#0b1118', fg='#ffffff', anchor='center')
+        title_label.place(relx=0.5, rely=0.5, anchor='center')
+        title_label.bind('<ButtonPress-1>', self._start_window_drag)
+        title_label.bind('<B1-Motion>', self._drag_window)
+        self.scaled_widgets.append((title_label, 'Segoe UI', 14, 'bold'))
+
+        minimize_button = tk.Button(header, text='_', command=self._hide_to_tray, bg='#0b1118', fg='#ffffff', activebackground='#182433', activeforeground='#ffffff', relief='flat', cursor='hand2', bd=0, padx=8)
+        minimize_button.grid(row=0, column=3, sticky='e', padx=(0, 2), pady=1)
+        self.scaled_widgets.append((minimize_button, 'Segoe UI', 14, 'bold'))
+
+        close_button = tk.Button(header, text='X', command=self._on_close, bg='#0b1118', fg='#ffffff', activebackground='#3a1218', activeforeground='#ffffff', relief='flat', cursor='hand2', bd=0, padx=8)
+        close_button.grid(row=0, column=4, sticky='e', padx=(0, 4), pady=1)
+        self.scaled_widgets.append((close_button, 'Segoe UI', 14, 'bold'))
+
+        shell.rowconfigure(1, weight=1)
+
         self.content = tk.Frame(shell, bg=BG)
-        self.content.grid(row=1, column=0, sticky='nsew')
+        self.content.grid(row=1, column=0, sticky='nsew', padx=8, pady=(8, 0))
         self.content.rowconfigure(0, weight=1)
         self.content.columnconfigure(0, weight=1)
         self.content.columnconfigure(1, weight=1)
@@ -522,7 +665,7 @@ class MonitorApp:
         self.wan1_panel.rowconfigure(1, weight=1)
         self.wan1_panel.rowconfigure(2, weight=1)
         self.wan1_panel.columnconfigure(0, weight=1)
-        self.wan1_title = self._label(self.wan1_panel, 'WAN 1', NEON_GREEN, BG, 'Consolas', 12, 'bold')
+        self.wan1_title = self._var_label(self.wan1_panel, self.wan1_ip_var, NEON_GREEN, BG, 'Consolas', 24, 'bold')
         self.wan1_title.grid(row=0, column=0, sticky='w', padx=4, pady=(0, 6))
         self.wan1_download_panel = GraphPanel(self.wan1_panel, 'DOWNLINK', NEON_GREEN, self.wan1_download_var)
         self.wan1_download_panel.grid(row=1, column=0, sticky='nsew', pady=(0, 8))
@@ -534,7 +677,7 @@ class MonitorApp:
         self.wan2_panel.rowconfigure(1, weight=1)
         self.wan2_panel.rowconfigure(2, weight=1)
         self.wan2_panel.columnconfigure(0, weight=1)
-        self.wan2_title = self._label(self.wan2_panel, 'WAN 2', NEON_GREEN, BG, 'Consolas', 12, 'bold')
+        self.wan2_title = self._var_label(self.wan2_panel, self.wan2_ip_var, NEON_GREEN, BG, 'Consolas', 24, 'bold')
         self.wan2_title.grid(row=0, column=0, sticky='w', padx=4, pady=(0, 6))
         self.wan2_download_panel = GraphPanel(self.wan2_panel, 'DOWNLINK', NEON_GREEN, self.wan2_download_var)
         self.wan2_download_panel.grid(row=1, column=0, sticky='nsew', pady=(0, 8))
@@ -546,6 +689,11 @@ class MonitorApp:
         footer.columnconfigure(0, weight=1)
         self.footer_label = self._var_label(footer, self.footer_var, '#6c7e97', BG, 'Segoe UI', 8, 'normal', wraplength=900)
         self.footer_label.grid(row=0, column=0, sticky='w')
+        resize_grip = tk.Label(footer, text='//', bg=BG, fg='#50637f', cursor='size_nw_se')
+        resize_grip.grid(row=0, column=1, sticky='se', padx=(8, 2))
+        resize_grip.bind('<ButtonPress-1>', self._start_window_resize)
+        resize_grip.bind('<B1-Motion>', self._resize_window)
+        self.scaled_widgets.append((resize_grip, 'Consolas', 10, 'bold'))
 
         self._apply_scale(1.0)
 
@@ -560,20 +708,20 @@ class MonitorApp:
         return label
 
     def _entry_field(self, parent: tk.Widget, row: int, label: str, variable: tk.StringVar, secret: bool) -> None:
-        field_label = self._label(parent, label, '#c7d2e0', CARD, 'Segoe UI', 8, 'bold')
+        field_label = self._label(parent, label, '#c7d2e0', CARD, 'Segoe UI', 14, 'bold')
         field_label.grid(row=row, column=0, sticky='w', padx=10, pady=(6, 2))
-        entry = tk.Entry(parent, textvariable=variable, show='*' if secret else '', bg='#07111b', fg='#eef6ff', insertbackground=NEON_GREEN, relief='flat', highlightthickness=1, highlightbackground='#203040', highlightcolor=NEON_GREEN)
-        entry.grid(row=row + 1, column=0, sticky='ew', padx=10, ipady=4)
-        self.scaled_widgets.append((entry, 'Consolas', 10, 'normal'))
+        entry = tk.Entry(parent, textvariable=variable, show='*' if secret else '', bg='#07111b', fg='#eef6ff', insertbackground=NEON_GREEN, relief='flat', highlightthickness=1, highlightbackground='#203040', highlightcolor=NEON_GREEN, bd=0)
+        entry.grid(row=row + 1, column=0, sticky='ew', padx=10, ipady=10)
+        self.scaled_widgets.append((entry, 'Consolas', 18, 'normal'))
 
     def _check(self, parent: tk.Widget, text: str, variable: tk.BooleanVar) -> tk.Checkbutton:
         check = tk.Checkbutton(parent, text=text, variable=variable, fg='#d9e3f0', bg=CARD, activebackground=CARD, activeforeground=NEON_GREEN, selectcolor='#07111b')
-        self.scaled_widgets.append((check, 'Segoe UI', 8, 'normal'))
+        self.scaled_widgets.append((check, 'Segoe UI', 24, 'normal'))
         return check
 
     def _button(self, parent: tk.Widget, text: str, command, bg: str, fg: str) -> tk.Button:
         button = tk.Button(parent, text=text, command=command, bg=bg, fg=fg, activebackground=NEON_GREEN if bg == NEON_GREEN else '#1d3042', activeforeground=fg, relief='flat', cursor='hand2')
-        self.scaled_widgets.append((button, 'Segoe UI', 9, 'bold'))
+        self.scaled_widgets.append((button, 'Segoe UI', 14, 'bold'))
         return button
 
     def _apply_wan2_visibility(self) -> None:
@@ -589,6 +737,7 @@ class MonitorApp:
             self.content.columnconfigure(1, weight=0)
             self.wan2_download_var.set('--')
             self.wan2_upload_var.set('--')
+            self.wan2_ip_var.set('WAN 2   --')
         self._layout_graphs()
 
     def _autostart_command(self) -> str:
@@ -632,7 +781,7 @@ class MonitorApp:
         self.options_visible = True
         window.title('Einstellungen')
         window.transient(self.root)
-        window.geometry('430x320')
+        window.geometry('620x620')
         window.configure(bg=CARD)
         window.attributes('-topmost', self.always_on_top_var.get())
         window.columnconfigure(0, weight=1)
@@ -646,9 +795,9 @@ class MonitorApp:
         panel = tk.Frame(window, bg=CARD, highlightbackground=NEON_GREEN, highlightthickness=1)
         panel.grid(row=0, column=0, sticky='nsew', padx=10, pady=10)
         panel.columnconfigure(0, weight=1)
-        title = self._label(panel, 'EINSTELLUNGEN', NEON_GREEN, CARD, 'Consolas', 14, 'bold')
+        title = self._label(panel, 'EINSTELLUNGEN', NEON_GREEN, CARD, 'Consolas', 26, 'bold')
         title.grid(row=0, column=0, sticky='w', padx=10, pady=(8, 2))
-        hint = self._label(panel, 'Speichern uebernimmt die Daten und startet das Monitoring direkt.', '#8ea0b8', CARD, 'Segoe UI', 8, 'normal', wraplength=320)
+        hint = self._label(panel, 'Speichern uebernimmt die Daten und startet das Monitoring direkt.', '#8ea0b8', CARD, 'Segoe UI', 10, 'normal', wraplength=320)
         hint.grid(row=1, column=0, sticky='w', padx=10, pady=(0, 6))
 
         self._entry_field(panel, 2, 'Router-IP oder URL', self.host_var, False)
@@ -659,11 +808,15 @@ class MonitorApp:
         show_wan2_check = self._check(panel, 'WAN 2 anzeigen', self.show_wan2_var)
         show_wan2_check.grid(row=9, column=0, sticky='w', padx=10, pady=(2, 2))
         autostart_check = self._check(panel, 'Mit Windows starten', self.autostart_var)
-        autostart_check.grid(row=10, column=0, sticky='w', padx=10, pady=(2, 4))
+        autostart_check.grid(row=10, column=0, sticky='w', padx=10, pady=(2, 2))
+        topmost_check = self._check(panel, 'Immer im Vordergrund', self.always_on_top_var)
+        topmost_check.grid(row=11, column=0, sticky='w', padx=10, pady=(2, 2))
+        tray_check = self._check(panel, 'Beim Minimieren in Tray', self.minimize_to_tray_var)
+        tray_check.grid(row=12, column=0, sticky='w', padx=10, pady=(2, 4))
         save_button = self._button(panel, 'Speichern', self.save_settings, NEON_GREEN, '#03120d')
-        save_button.grid(row=11, column=0, sticky='ew', padx=10, pady=(6, 6))
+        save_button.grid(row=13, column=0, sticky='ew', padx=10, pady=(6, 6))
         logout_button = self._button(panel, 'Abmelden', self.logout_and_clear_session, '#111827', '#dbe8f7')
-        logout_button.grid(row=12, column=0, sticky='ew', padx=10, pady=(0, 8))
+        logout_button.grid(row=14, column=0, sticky='ew', padx=10, pady=(0, 8))
 
         self.options_hint = hint
         self.save_button = save_button
@@ -673,8 +826,8 @@ class MonitorApp:
         window.bind('<Destroy>', self._on_settings_window_destroy)
         self._apply_scale(self.scale if not force else max(0.75, self.scale))
         window.update_idletasks()
-        required_width = max(430, panel.winfo_reqwidth() + 20)
-        required_height = max(360, panel.winfo_reqheight() + 20)
+        required_width = max(620, panel.winfo_reqwidth() + 40)
+        required_height = max(620, panel.winfo_reqheight() + 40)
         window.minsize(required_width, required_height)
         window.geometry(f'{required_width}x{required_height}')
         window.lift()
@@ -695,7 +848,9 @@ class MonitorApp:
         self.root.update_idletasks()
         panel_height = max(self.wan1_panel.winfo_height(), self.wan2_panel.winfo_height(), 120)
         graph_height = max(28, (panel_height - 30) // 2)
+        compact = graph_height < 48
         for panel in [self.wan1_download_panel, self.wan1_upload_panel, self.wan2_download_panel, self.wan2_upload_panel]:
+            panel.set_compact(compact)
             panel.canvas.configure(height=graph_height)
             panel.redraw()
 
@@ -718,8 +873,12 @@ class MonitorApp:
             'always_on_top': bool(self.always_on_top_var.get()),
             'show_wan2': bool(self.show_wan2_var.get()),
             'autostart': bool(self.autostart_var.get()),
+            'minimize_to_tray': bool(self.minimize_to_tray_var.get()),
         }
         ConfigStore.save(self.config)
+        self.root.attributes('-topmost', self.always_on_top_var.get())
+        if self.settings_window is not None and self.settings_window.winfo_exists():
+            self.settings_window.attributes('-topmost', self.always_on_top_var.get())
         self._apply_wan2_visibility()
         self._apply_autostart()
         self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
@@ -751,6 +910,7 @@ class MonitorApp:
         self.config['options_visible'] = False
         self.config['show_wan2'] = bool(self.show_wan2_var.get())
         self.config['autostart'] = bool(self.autostart_var.get())
+        self.config['minimize_to_tray'] = bool(self.minimize_to_tray_var.get())
         if self._has_credentials(self.config):
             ConfigStore.save(self.config)
         self.open_settings_window(force=True)
@@ -766,26 +926,28 @@ class MonitorApp:
 
     def _apply_snapshot(self, snapshot: WanSnapshot) -> None:
         slots = {
-            'WAN 1': (self.wan1_download_var, self.wan1_upload_var, self.wan1_download_panel, self.wan1_upload_panel),
-            'WAN 2': (self.wan2_download_var, self.wan2_upload_var, self.wan2_download_panel, self.wan2_upload_panel),
+            'WAN 1': (self.wan1_download_var, self.wan1_upload_var, self.wan1_download_panel, self.wan1_upload_panel, self.wan1_ip_var),
+            'WAN 2': (self.wan2_download_var, self.wan2_upload_var, self.wan2_download_panel, self.wan2_upload_panel, self.wan2_ip_var),
         }
         seen = set()
         for reading in snapshot.readings:
             slot = slots.get(reading.name)
             if slot is None:
                 continue
-            download_var, upload_var, download_panel, upload_panel = slot
+            download_var, upload_var, download_panel, upload_panel, ip_var = slot
             download_var.set(self._format_rate(reading.download_bps))
             upload_var.set(self._format_rate(reading.upload_bps))
             download_panel.add_point(reading.timestamp, reading.download_bps)
             upload_panel.add_point(reading.timestamp, reading.upload_bps)
+            ip_var.set(f"{reading.name}   {reading.external_ip or '--'}")
             seen.add(reading.name)
         for name, slot in slots.items():
             if name in seen:
                 continue
-            download_var, upload_var, _, _ = slot
+            download_var, upload_var, _, _, ip_var = slot
             download_var.set('--')
             upload_var.set('--')
+            ip_var.set(f"{name}   --")
         self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
 
     def _apply_error(self) -> None:
@@ -793,6 +955,8 @@ class MonitorApp:
         self.wan1_upload_var.set('--')
         self.wan2_download_var.set('--')
         self.wan2_upload_var.set('--')
+        self.wan1_ip_var.set('WAN 1   --')
+        self.wan2_ip_var.set('WAN 2   --')
         self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
         self.running = False
         if self.client is not None:
@@ -843,7 +1007,7 @@ class MonitorApp:
         if self.exiting:
             return
         try:
-            if self.root.state() == 'iconic' and not self.in_tray:
+            if self.root.state() == 'iconic' and not self.in_tray and self.minimize_to_tray_var.get():
                 self._hide_to_tray()
         except tk.TclError:
             pass
@@ -856,6 +1020,7 @@ class MonitorApp:
         self.config['always_on_top'] = enabled
         self.config['show_wan2'] = bool(self.show_wan2_var.get())
         self.config['autostart'] = bool(self.autostart_var.get())
+        self.config['minimize_to_tray'] = bool(self.minimize_to_tray_var.get())
         if self._has_credentials(self.config):
             ConfigStore.save(self.config)
 
@@ -916,6 +1081,7 @@ class MonitorApp:
         self.config['always_on_top'] = bool(self.always_on_top_var.get())
         self.config['show_wan2'] = bool(self.show_wan2_var.get())
         self.config['autostart'] = bool(self.autostart_var.get())
+        self.config['minimize_to_tray'] = bool(self.minimize_to_tray_var.get())
         if self._has_credentials(self.config):
             ConfigStore.save(self.config)
         if self.client is not None:
