@@ -59,6 +59,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     'show_wan2': False,
     'autostart': False,
     'minimize_to_tray': True,
+    'window_width': BASE_WIDTH,
+    'window_height': BASE_HEIGHT,
+    'window_x': 120,
+    'window_y': 120,
 }
 
 STARTUP_DIR = Path(os.environ.get('APPDATA', str(Path.home()))) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs' / 'Startup'
@@ -77,7 +81,7 @@ DWMWA_CAPTION_COLOR = 35
 DWMWA_TEXT_COLOR = 36
 
 
-@dataclass
+@dataclass(slots=True)
 class WanReading:
     name: str
     download_bps: float
@@ -87,7 +91,7 @@ class WanReading:
     external_ip: str = '--'
 
 
-@dataclass
+@dataclass(slots=True)
 class WanSnapshot:
     readings: list[WanReading] = field(default_factory=list)
 
@@ -136,6 +140,10 @@ class ConfigStore:
             'show_wan2': bool(config.get('show_wan2', False)),
             'autostart': bool(config.get('autostart', False)),
             'minimize_to_tray': bool(config.get('minimize_to_tray', True)),
+            'window_width': int(config.get('window_width', BASE_WIDTH)),
+            'window_height': int(config.get('window_height', BASE_HEIGHT)),
+            'window_x': int(config.get('window_x', 120)),
+            'window_y': int(config.get('window_y', 120)),
             'password_encrypted': '',
         }
         if data['remember_password'] and config.get('password'):
@@ -460,7 +468,8 @@ class GraphPanel(tk.Frame):
         super().__init__(parent, bg=CARD, highlightbackground=accent, highlightthickness=1)
         self.accent = accent
         self.compact_mode = False
-        self.history: deque[tuple[float, float]] = deque()
+        max_points = max(16, int((HISTORY_WINDOW_SECONDS / DEFAULT_POLL_SECONDS) + 8))
+        self.history: deque[tuple[float, float]] = deque(maxlen=max_points)
         self.title_label = tk.Label(self, text=title, fg=accent, bg=CARD)
         self.title_label.pack(anchor='w', padx=10, pady=(6, 0))
         self.value_label = tk.Label(self, textvariable=value_var, fg='#eff8ff', bg=CARD)
@@ -493,12 +502,17 @@ class GraphPanel(tk.Frame):
         self.info_label.configure(font=('Segoe UI', max(6, int(8 * scale))))
         self.redraw()
 
-    def add_point(self, timestamp: float, value: float) -> None:
+    def add_point(self, timestamp: float, value: float, redraw: bool = True) -> None:
         self.history.append((timestamp, value))
         self._trim(timestamp)
-        self.redraw()
+        if redraw:
+            self.redraw()
 
     def redraw(self) -> None:
+        now = time.time()
+        self._trim(now)
+        if self.compact_mode or not self.canvas.winfo_ismapped():
+            return
         width = max(80, self.canvas.winfo_width())
         height = max(28, self.canvas.winfo_height())
         self.canvas.delete('all')
@@ -506,8 +520,6 @@ class GraphPanel(tk.Frame):
         for step in range(1, 3):
             y = height * step / 3
             self.canvas.create_line(0, y, width, y, fill='#142537')
-        now = time.time()
-        self._trim(now)
         if len(self.history) < 2:
             return
         max_value = max(point[1] for point in self.history) or 1.0
@@ -529,11 +541,15 @@ class MonitorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title('UDM WAN Speed Monitor')
-        self.root.geometry(f'{BASE_WIDTH}x{BASE_HEIGHT}')
+        self.config = ConfigStore.load()
+        initial_width = max(MIN_WIDTH, int(self.config.get('window_width', BASE_WIDTH)))
+        initial_height = max(MIN_HEIGHT, int(self.config.get('window_height', BASE_HEIGHT)))
+        initial_x = int(self.config.get('window_x', 120))
+        initial_y = int(self.config.get('window_y', 120))
+        self.root.geometry(f'{initial_width}x{initial_height}+{initial_x}+{initial_y}')
         self.root.minsize(MIN_WIDTH, MIN_HEIGHT)
         self.root.configure(bg=BG)
 
-        self.config = ConfigStore.load()
         self.client: UdmClient | None = None
         self.running = False
         self.worker: threading.Thread | None = None
@@ -542,6 +558,7 @@ class MonitorApp:
         self.tray_icon: pystray.Icon | None = None
         self.tray_thread: threading.Thread | None = None
         self.settings_window: tk.Toplevel | None = None
+        self.resize_after_id: str | None = None
         self.drag_offset_x = 0
         self.drag_offset_y = 0
         self.resize_start_x = 0
@@ -551,6 +568,12 @@ class MonitorApp:
         self.settings_open_in_tray = False
         self.in_tray = False
         self.exiting = False
+        self.last_window_geometry = {
+            'window_width': initial_width,
+            'window_height': initial_height,
+            'window_x': initial_x,
+            'window_y': initial_y,
+        }
 
         self.wan1_download_var = tk.StringVar(value='--')
         self.wan1_upload_var = tk.StringVar(value='--')
@@ -919,6 +942,7 @@ class MonitorApp:
         self.config['show_wan2'] = bool(self.show_wan2_var.get())
         self.config['autostart'] = bool(self.autostart_var.get())
         self.config['minimize_to_tray'] = bool(self.minimize_to_tray_var.get())
+        self.config.update(self.last_window_geometry)
         if self._has_credentials(self.config):
             ConfigStore.save(self.config)
         self.open_settings_window(force=True)
@@ -938,6 +962,7 @@ class MonitorApp:
             'WAN 2': (self.wan2_download_var, self.wan2_upload_var, self.wan2_download_panel, self.wan2_upload_panel, self.wan2_ip_var),
         }
         seen = set()
+        dirty_panels: set[GraphPanel] = set()
         for reading in snapshot.readings:
             slot = slots.get(reading.name)
             if slot is None:
@@ -945,8 +970,10 @@ class MonitorApp:
             download_var, upload_var, download_panel, upload_panel, ip_var = slot
             download_var.set(self._format_rate(reading.download_bps))
             upload_var.set(self._format_rate(reading.upload_bps))
-            download_panel.add_point(reading.timestamp, reading.download_bps)
-            upload_panel.add_point(reading.timestamp, reading.upload_bps)
+            download_panel.add_point(reading.timestamp, reading.download_bps, redraw=False)
+            upload_panel.add_point(reading.timestamp, reading.upload_bps, redraw=False)
+            dirty_panels.add(download_panel)
+            dirty_panels.add(upload_panel)
             ip_var.set(f"{reading.name}   {reading.external_ip or '--'}")
             seen.add(reading.name)
         for name, slot in slots.items():
@@ -956,6 +983,8 @@ class MonitorApp:
             download_var.set('--')
             upload_var.set('--')
             ip_var.set(f"{name}   --")
+        for panel in dirty_panels:
+            panel.redraw()
         self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
 
     def _apply_error(self) -> None:
@@ -980,7 +1009,29 @@ class MonitorApp:
             index += 1
         return f'{value:.2f} {units[index]}'
 
+    def _remember_window_geometry(self) -> None:
+        try:
+            width = max(MIN_WIDTH, self.root.winfo_width())
+            height = max(MIN_HEIGHT, self.root.winfo_height())
+            x = self.root.winfo_x()
+            y = self.root.winfo_y()
+            self.last_window_geometry = {
+                'window_width': width,
+                'window_height': height,
+                'window_x': x,
+                'window_y': y,
+            }
+        except tk.TclError:
+            pass
+
     def _on_resize(self, _event=None) -> None:
+        self._remember_window_geometry()
+        if self.resize_after_id is not None:
+            self.root.after_cancel(self.resize_after_id)
+        self.resize_after_id = self.root.after(60, self._apply_pending_resize)
+
+    def _apply_pending_resize(self) -> None:
+        self.resize_after_id = None
         width = max(MIN_WIDTH, self.root.winfo_width())
         height = max(MIN_HEIGHT, self.root.winfo_height())
         scale = max(0.45, min(1.25, min(width / BASE_WIDTH, height / BASE_HEIGHT)))
@@ -1029,6 +1080,7 @@ class MonitorApp:
         self.config['show_wan2'] = bool(self.show_wan2_var.get())
         self.config['autostart'] = bool(self.autostart_var.get())
         self.config['minimize_to_tray'] = bool(self.minimize_to_tray_var.get())
+        self.config.update(self.last_window_geometry)
         if self._has_credentials(self.config):
             ConfigStore.save(self.config)
 
@@ -1090,6 +1142,7 @@ class MonitorApp:
         self.config['show_wan2'] = bool(self.show_wan2_var.get())
         self.config['autostart'] = bool(self.autostart_var.get())
         self.config['minimize_to_tray'] = bool(self.minimize_to_tray_var.get())
+        self.config.update(self.last_window_geometry)
         if self._has_credentials(self.config):
             ConfigStore.save(self.config)
         if self.client is not None:
