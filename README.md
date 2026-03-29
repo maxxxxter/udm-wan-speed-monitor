@@ -4,7 +4,7 @@ Desktop-App fuer Windows, die den aktuellen WAN-Downlink und Uplink deiner UDM P
 
 ## Features
 
-- Dark Theme mit neonartiger UI
+- Dark Theme
 - Einstellungsfenster fuer Router-IP, Benutzername und Passwort
 - Passwort kann dauerhaft gespeichert werden
 - Passwort wird per Windows-DPAPI verschluesselt gespeichert, nicht im Klartext
