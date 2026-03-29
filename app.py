@@ -316,7 +316,7 @@ class UdmClient:
 
     def _merge_readings(self, preferred: WanReading, other: WanReading) -> WanReading:
         external_ip = preferred.external_ip
-        if self._ip_priority(other.external_ip) > self._ip_priority(external_ip):
+        if self._ip_priority(other.external_ip, preferred.name) > self._ip_priority(external_ip, preferred.name):
             external_ip = other.external_ip
         return WanReading(preferred.name, preferred.download_bps, preferred.upload_bps, preferred.source, preferred.timestamp, external_ip)
 
@@ -360,35 +360,43 @@ class UdmClient:
         return normalized
 
     def _extract_external_ip(self, item: dict[str, Any], name: str | None = None) -> str:
-        candidates = [
-            item.get('public_ip'), item.get('public_ip_address'), item.get('external_ip'),
-            item.get('wan_ip'), item.get('ipaddr'), item.get('ip_address'),
-        ]
-        if name in {'WAN 1', 'WAN 2'}:
-            candidates.extend([item.get('ip'), item.get('address'), item.get('addr')])
+        if name == 'WAN 2':
+            candidates = [
+                item.get('ipaddr'), item.get('ip_address'), item.get('ip'), item.get('address'), item.get('addr'),
+                item.get('wan_ip'), item.get('public_ip'), item.get('public_ip_address'), item.get('external_ip'),
+            ]
+        else:
+            candidates = [
+                item.get('public_ip'), item.get('public_ip_address'), item.get('external_ip'),
+                item.get('wan_ip'), item.get('ipaddr'), item.get('ip_address'),
+            ]
+            if name in {'WAN 1', 'WAN 2'}:
+                candidates.extend([item.get('ip'), item.get('address'), item.get('addr')])
         best = '--'
         for value in candidates:
-            if self._ip_priority(value) > self._ip_priority(best):
+            if self._ip_priority(value, name) > self._ip_priority(best, name):
                 best = str(value).strip()
         for key, value in item.items():
             lowered = str(key).lower()
             if any(token in lowered for token in ['public', 'external', 'wan_ip', 'ipaddr', 'ip_address']) and all(token not in lowered for token in ['gateway', 'remote', 'dns']):
-                if self._ip_priority(value) > self._ip_priority(best):
+                if self._ip_priority(value, name) > self._ip_priority(best, name):
                     best = str(value).strip()
         if name in {'WAN 1', 'WAN 2'}:
             for key, value in item.items():
                 lowered = str(key).lower()
-                if lowered in {'ip', 'address', 'addr'} and self._ip_priority(value) > self._ip_priority(best):
+                if lowered in {'ip', 'address', 'addr'} and self._ip_priority(value, name) > self._ip_priority(best, name):
                     best = str(value).strip()
         return best
 
-    def _ip_priority(self, value: Any) -> int:
+    def _ip_priority(self, value: Any, name: str | None = None) -> int:
         if not self._looks_like_ip(value):
             return 0
         try:
             ip = ipaddress.ip_address(str(value).strip())
         except ValueError:
             return 0
+        if name == 'WAN 2' and ip.is_private:
+            return 4
         if getattr(ip, 'is_global', False):
             return 3
         if not any([ip.is_private, ip.is_loopback, ip.is_link_local, ip.is_multicast, ip.is_unspecified, ip.is_reserved]):
