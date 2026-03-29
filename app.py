@@ -1,5 +1,4 @@
 ﻿import ctypes
-import ipaddress
 import json
 import os
 import ssl
@@ -88,7 +87,7 @@ class WanReading:
     upload_bps: float
     source: str
     timestamp: float
-    external_ip: str = '--'
+    ping_ms: str = '--'
 
 
 @dataclass(slots=True)
@@ -312,21 +311,21 @@ class UdmClient:
     def _reading_from_object(self, item: dict[str, Any], source: str, name: str | None) -> WanReading | None:
         download = self._extract_rate(item, 'download')
         upload = self._extract_rate(item, 'upload')
-        external_ip = self._extract_external_ip(item, name)
+        ping_ms = self._extract_ping_ms(item)
         if download is None or upload is None:
-            if name is None or external_ip in {'', '--'}:
+            if name is None or ping_ms in {'', '--'}:
                 return None
-            return WanReading(name, float(download or 0.0), float(upload or 0.0), source, time.time(), external_ip)
-        return WanReading(name, download, upload, source, time.time(), external_ip)
+            return WanReading(name, float(download or 0.0), float(upload or 0.0), source, time.time(), ping_ms)
+        return WanReading(name, download, upload, source, time.time(), ping_ms)
 
     def _wan_name(self, item: dict[str, Any], index: int) -> str:
         return self._wan_label_from_context(item, ()) or f'WAN {index}'
 
     def _merge_readings(self, preferred: WanReading, other: WanReading) -> WanReading:
-        external_ip = preferred.external_ip
-        if self._ip_priority(other.external_ip, preferred.name) > self._ip_priority(external_ip, preferred.name):
-            external_ip = other.external_ip
-        return WanReading(preferred.name, preferred.download_bps, preferred.upload_bps, preferred.source, preferred.timestamp, external_ip)
+        ping_ms = preferred.ping_ms if preferred.ping_ms not in {'', '--'} else other.ping_ms
+        if ping_ms in {'', '--'}:
+            ping_ms = '--'
+        return WanReading(preferred.name, preferred.download_bps, preferred.upload_bps, preferred.source, preferred.timestamp, ping_ms)
 
     def _dedupe_readings(self, readings: list[WanReading]) -> list[WanReading]:
         deduped: dict[str, WanReading] = {}
@@ -364,61 +363,57 @@ class UdmClient:
                 reading = fallback.pop(0)
             if reading is None:
                 continue
-            normalized.append(WanReading(label, reading.download_bps, reading.upload_bps, reading.source, reading.timestamp, reading.external_ip))
+            normalized.append(WanReading(label, reading.download_bps, reading.upload_bps, reading.source, reading.timestamp, reading.ping_ms))
         return normalized
 
-    def _extract_external_ip(self, item: dict[str, Any], name: str | None = None) -> str:
-        if name == 'WAN 2':
-            candidates = [
-                item.get('ipaddr'), item.get('ip_address'), item.get('ip'), item.get('address'), item.get('addr'),
-                item.get('wan_ip'), item.get('public_ip'), item.get('public_ip_address'), item.get('external_ip'),
-            ]
-        else:
-            candidates = [
-                item.get('public_ip'), item.get('public_ip_address'), item.get('external_ip'),
-                item.get('wan_ip'), item.get('ipaddr'), item.get('ip_address'),
-            ]
-            if name in {'WAN 1', 'WAN 2'}:
-                candidates.extend([item.get('ip'), item.get('address'), item.get('addr')])
-        best = '--'
+    def _extract_ping_ms(self, item: dict[str, Any]) -> str:
+        candidates = [
+            item.get('latency'), item.get('latency_ms'), item.get('avg_latency'), item.get('average_latency'),
+            item.get('ping'), item.get('ping_ms'), item.get('avg_ping'), item.get('rtt'), item.get('rtt_ms'),
+            item.get('response_time'), item.get('response_time_ms'), item.get('wan_latency'), item.get('uplink_latency'),
+        ]
+        best_value = None
         for value in candidates:
-            if self._ip_priority(value, name) > self._ip_priority(best, name):
-                best = str(value).strip()
-        for key, value in item.items():
-            lowered = str(key).lower()
-            if any(token in lowered for token in ['public', 'external', 'wan_ip', 'ipaddr', 'ip_address']) and all(token not in lowered for token in ['gateway', 'remote', 'dns']):
-                if self._ip_priority(value, name) > self._ip_priority(best, name):
-                    best = str(value).strip()
-        if name in {'WAN 1', 'WAN 2'}:
+            parsed = self._parse_ping_value(value)
+            if parsed is not None:
+                best_value = parsed
+                break
+        if best_value is None:
             for key, value in item.items():
                 lowered = str(key).lower()
-                if lowered in {'ip', 'address', 'addr'} and self._ip_priority(value, name) > self._ip_priority(best, name):
-                    best = str(value).strip()
-        return best
+                if any(token in lowered for token in ('latency', 'ping', 'rtt', 'response_time')):
+                    parsed = self._parse_ping_value(value)
+                    if parsed is not None:
+                        best_value = parsed
+                        break
+        return self._format_ping(best_value)
 
-    def _ip_priority(self, value: Any, name: str | None = None) -> int:
-        if not self._looks_like_ip(value):
-            return 0
-        try:
-            ip = ipaddress.ip_address(str(value).strip())
-        except ValueError:
-            return 0
-        if name == 'WAN 2' and ip.is_private:
-            return 4
-        if getattr(ip, 'is_global', False):
-            return 3
-        if not any([ip.is_private, ip.is_loopback, ip.is_link_local, ip.is_multicast, ip.is_unspecified, ip.is_reserved]):
-            return 2
-        return 1
+    def _parse_ping_value(self, value: Any) -> float | None:
+        if isinstance(value, (int, float)):
+            return float(value) if value >= 0 else None
+        if isinstance(value, str):
+            cleaned = value.strip().lower().replace('ms', '').strip()
+            try:
+                parsed = float(cleaned)
+            except ValueError:
+                return None
+            return parsed if parsed >= 0 else None
+        if isinstance(value, dict):
+            for key in ('avg', 'average', 'value', 'latency', 'ping', 'rtt', 'ms'):
+                if key in value:
+                    parsed = self._parse_ping_value(value.get(key))
+                    if parsed is not None:
+                        return parsed
+        return None
 
-    def _looks_like_ip(self, value: Any) -> bool:
-        if not isinstance(value, str):
-            return False
-        raw = value.strip()
-        if raw.count('.') == 3:
-            parts = raw.split('.')
-            return all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
-        return ':' in raw and len(raw) >= 2
+    def _format_ping(self, value: float | None) -> str:
+        if value is None:
+            return '--'
+        if value >= 100:
+            return f'{value:.0f} ms'
+        if value >= 10:
+            return f'{value:.1f} ms'
+        return f'{value:.2f} ms'
 
     def _extract_rate(self, item: dict[str, Any], direction: str) -> float | None:
         aliases = {
@@ -974,7 +969,7 @@ class MonitorApp:
             upload_panel.add_point(reading.timestamp, reading.upload_bps, redraw=False)
             dirty_panels.add(download_panel)
             dirty_panels.add(upload_panel)
-            ip_var.set(f"{reading.name}   {reading.external_ip or '--'}")
+            ip_var.set(f"{reading.name}   {reading.ping_ms or '--'}")
             seen.add(reading.name)
         for name, slot in slots.items():
             if name in seen:
