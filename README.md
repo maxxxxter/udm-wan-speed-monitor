@@ -27,11 +27,9 @@ Desktop-App fuer Windows, die den aktuellen WAN-Downlink und Uplink deiner UDM P
 - `config.json`: wird unter `%LOCALAPPDATA%\UDM WAN Speed Monitor` automatisch angelegt
 - `run-udm-wan-speed-monitor.bat`: Starter fuer Windows
 - `build_release.ps1`: baut die Release-EXE
-- `build_installer.ps1`: baut den IExpress-Installer
 - `build_msi.ps1`: baut den klassischen MSI-Installer
 - `sign_release.ps1`: signiert EXE und MSI mit signtool.exe
 - `dist/UDM-WAN-Speed-Monitor-1.0.msi`: MSI-Installer fuer Windows
-- `dist/UDM-WAN-Speed-Monitor-Installer.exe`: IExpress-Installer fuer Windows
 - `generate_checksums.ps1`: erzeugt SHA256-Pruefsummen fuer die Releases
 - `dist/SHA256SUMS.txt`: SHA256-Pruefsummen der Release-Dateien
 

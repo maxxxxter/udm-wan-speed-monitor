@@ -1,3 +1,2 @@
 b39b850aa6a178f8211da1d775367512c5d0d7886430b0d5734682096a9fe39c *udm-wan-speed-monitor-1.0.exe
 a0f92bad5ebf4e4f97c4a098faed3fede18dfd4503eee185d80f107d5f58a89c *UDM-WAN-Speed-Monitor-1.0.msi
-5c46e73a3e5e89f6eafde1e27afc3b1f97f192485ae7b192033f4ecb647e83f3 *UDM-WAN-Speed-Monitor-Installer.exe
