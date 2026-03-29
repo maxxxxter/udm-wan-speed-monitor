@@ -3,7 +3,8 @@ __pycache__/
 *.pyo
 *.pyd
 build/
-dist/
+dist/*
+!dist/udm-wan-speed-monitor-1.0.exe
 *.rar
 *.spec
 .env
