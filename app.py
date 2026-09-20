@@ -38,6 +38,8 @@ ICON_CANDIDATES = [
 ]
 HISTORY_WINDOW_SECONDS = 300
 DEFAULT_POLL_SECONDS = 2.0
+REQUEST_TIMEOUT_SECONDS = 5.0
+MAX_CONSECUTIVE_ERRORS = 3
 MIN_WIDTH = 220
 MIN_HEIGHT = 120
 BASE_WIDTH = 1180
@@ -237,7 +239,7 @@ class UdmClient:
             req_headers.update(headers)
         req = request.Request(url, data=data, headers=req_headers, method='POST' if data is not None else 'GET')
         try:
-            return self.opener.open(req, timeout=10)
+            return self.opener.open(req, timeout=REQUEST_TIMEOUT_SECONDS)
         except error.HTTPError as exc:
             if exc.code == 401 and path != '/api/auth/login':
                 self.logged_in = False
@@ -548,6 +550,8 @@ class MonitorApp:
         self.client: UdmClient | None = None
         self.running = False
         self.worker: threading.Thread | None = None
+        self.monitor_generation = 0
+        self.consecutive_errors = 0
         self.options_visible = bool(self.config.get('options_visible', False))
         self.scale = 1.0
         self.tray_icon: pystray.Icon | None = None
@@ -916,19 +920,25 @@ class MonitorApp:
     def start_monitoring(self) -> None:
         if self.running or not self._has_credentials(self.config):
             return
-        self.client = UdmClient(self.config)
+        self.monitor_generation += 1
+        generation = self.monitor_generation
+        client = UdmClient(self.config)
+        self.client = client
         self.running = True
+        self.consecutive_errors = 0
         self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
-        self.worker = threading.Thread(target=self._poll_loop, daemon=True)
+        self.worker = threading.Thread(target=self._poll_loop, args=(generation, client), daemon=True)
         self.worker.start()
 
     def stop_monitoring(self, silent: bool = False) -> None:
+        client = self.client
+        self.monitor_generation += 1
         self.running = False
+        self.client = None
         if not silent:
             self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
-        if self.client is not None:
-            self.client.logout()
-            self.client = None
+        if client is not None:
+            threading.Thread(target=client.logout, daemon=True).start()
 
     def logout_and_clear_session(self) -> None:
         self.stop_monitoring(silent=True)
@@ -942,16 +952,30 @@ class MonitorApp:
             ConfigStore.save(self.config)
         self.open_settings_window(force=True)
 
-    def _poll_loop(self) -> None:
-        while self.running and self.client is not None:
+    def _poll_loop(self, generation: int, client: UdmClient) -> None:
+        consecutive_errors = 0
+        while self.running and generation == self.monitor_generation:
             try:
-                snapshot = self.client.fetch_wan_snapshot()
-                self.root.after(0, self._apply_snapshot, snapshot)
-            except Exception:
-                self.root.after(0, self._apply_error)
-            time.sleep(DEFAULT_POLL_SECONDS)
+                snapshot = client.fetch_wan_snapshot()
+                consecutive_errors = 0
+                self.root.after(0, self._apply_snapshot, generation, snapshot)
+                delay = DEFAULT_POLL_SECONDS
+            except Exception as exc:
+                consecutive_errors += 1
+                client.logged_in = False
+                self.root.after(0, self._apply_error, generation, consecutive_errors, str(exc))
+                delay = max(DEFAULT_POLL_SECONDS, min(30.0, DEFAULT_POLL_SECONDS * consecutive_errors))
+            self._sleep_poll_interval(generation, delay)
 
-    def _apply_snapshot(self, snapshot: WanSnapshot) -> None:
+    def _sleep_poll_interval(self, generation: int, delay: float) -> None:
+        deadline = time.time() + delay
+        while self.running and generation == self.monitor_generation and time.time() < deadline:
+            time.sleep(min(0.25, deadline - time.time()))
+
+    def _apply_snapshot(self, generation: int, snapshot: WanSnapshot) -> None:
+        if generation != self.monitor_generation:
+            return
+        self.consecutive_errors = 0
         slots = {
             'WAN 1': (self.wan1_download_var, self.wan1_upload_var, self.wan1_download_panel, self.wan1_upload_panel, self.wan1_ip_var),
             'WAN 2': (self.wan2_download_var, self.wan2_upload_var, self.wan2_download_panel, self.wan2_upload_panel, self.wan2_ip_var),
@@ -982,18 +1006,21 @@ class MonitorApp:
             panel.redraw()
         self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
 
-    def _apply_error(self) -> None:
+    def _apply_error(self, generation: int, consecutive_errors: int, message: str) -> None:
+        if generation != self.monitor_generation:
+            return
+        self.consecutive_errors = consecutive_errors
         self.wan1_download_var.set('--')
         self.wan1_upload_var.set('--')
         self.wan2_download_var.set('--')
         self.wan2_upload_var.set('--')
         self.wan1_ip_var.set('WAN 1   Ping --')
         self.wan2_ip_var.set('WAN 2   Ping --')
-        self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
-        self.running = False
-        if self.client is not None:
-            self.client.logout()
-            self.client = None
+        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+            detail = message[:120] if message else 'UDM nicht erreichbar'
+            self.footer_var.set(f'Verbindung unterbrochen, retry laeuft: {detail}')
+        else:
+            self.footer_var.set(f'Verbindung wird erneut aufgebaut ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS})')
 
     def _format_rate(self, bps: float) -> str:
         units = ['bit/s', 'Kbit/s', 'Mbit/s', 'Gbit/s']
