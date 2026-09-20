@@ -4,7 +4,7 @@
     Id="*"
     Name="UDM WAN Speed Monitor"
     Language="1033"
-    Version="1.0.0"
+    Version="1.0.1"
     Manufacturer="Maxxter"
     UpgradeCode="AF536E61-D31B-43E3-BE84-9AB233D2F401">
     <Package
@@ -38,7 +38,7 @@
 
     <DirectoryRef Id="INSTALLDIR">
       <Component Id="MainExecutableComponent" Guid="A53E61D2-EAB2-4D32-8B6C-11CCB5B5CC01">
-        <File Id="MainExecutable" Source="..\dist\udm-wan-speed-monitor-1.0.exe" />
+        <File Id="MainExecutable" Source="..\dist\udm-wan-speed-monitor-1.0.1.exe" />
         <RegistryValue Root="HKCU" Key="Software\Maxxter\UDM WAN Speed Monitor" Name="ExeInstalled" Type="integer" Value="1" KeyPath="yes" />
       </Component>
 
@@ -71,7 +71,7 @@
           Id="StartMenuShortcut"
           Name="UDM WAN Speed Monitor"
           Description="UDM WAN Speed Monitor"
-          Target="[INSTALLDIR]udm-wan-speed-monitor-1.0.exe"
+          Target="[INSTALLDIR]udm-wan-speed-monitor-1.0.1.exe"
           WorkingDirectory="INSTALLDIR"
           Icon="AppIcon"
           IconIndex="0" />
@@ -86,7 +86,7 @@
           Id="DesktopShortcut"
           Name="UDM WAN Speed Monitor"
           Description="UDM WAN Speed Monitor"
-          Target="[INSTALLDIR]udm-wan-speed-monitor-1.0.exe"
+          Target="[INSTALLDIR]udm-wan-speed-monitor-1.0.1.exe"
           WorkingDirectory="INSTALLDIR"
           Icon="AppIcon"
           IconIndex="0" />

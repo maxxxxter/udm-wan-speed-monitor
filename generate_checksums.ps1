@@ -2,8 +2,8 @@ $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $distDir = Join-Path $scriptDir 'dist'
 $targets = @(
-    'udm-wan-speed-monitor-1.0.exe',
-    'UDM-WAN-Speed-Monitor-1.0.msi',
+    'udm-wan-speed-monitor-1.0.1.exe',
+    'UDM-WAN-Speed-Monitor-1.0.1.msi',
     'UDM-WAN-Speed-Monitor-Installer.exe'
 )
 $outFile = Join-Path $distDir 'SHA256SUMS.txt'

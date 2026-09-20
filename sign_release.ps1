@@ -10,8 +10,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $targets = @(
-    (Join-Path $scriptDir 'dist\udm-wan-speed-monitor-1.0.exe'),
-    (Join-Path $scriptDir 'dist\UDM-WAN-Speed-Monitor-1.0.msi')
+    (Join-Path $scriptDir 'dist\udm-wan-speed-monitor-1.0.1.exe'),
+    (Join-Path $scriptDir 'dist\UDM-WAN-Speed-Monitor-1.0.1.msi')
 )
 
 $signtoolCandidates = @()

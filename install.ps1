@@ -2,12 +2,12 @@ $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appName = 'UDM WAN Speed Monitor'
 $companyName = 'Maxxter'
-$version = '1.0.0'
+$version = '1.0.1'
 $installDir = Join-Path $env:LOCALAPPDATA 'Programs\UDM WAN Speed Monitor'
 $desktop = [Environment]::GetFolderPath('Desktop')
 $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
 $startMenuFolder = Join-Path $startMenu $companyName
-$target = Join-Path $installDir 'udm-wan-speed-monitor-1.0.exe'
+$target = Join-Path $installDir 'udm-wan-speed-monitor-1.0.1.exe'
 $icon = Join-Path $installDir 'udm-wan-speed-monitor-v2.ico'
 $uninstallScript = Join-Path $installDir 'uninstall.ps1'
 $desktopShortcutPath = Join-Path $desktop "$appName.lnk"
@@ -16,7 +16,7 @@ $uninstallCmd = "powershell.exe -ExecutionPolicy Bypass -File `"$uninstallScript
 
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 New-Item -ItemType Directory -Force -Path $startMenuFolder | Out-Null
-Copy-Item (Join-Path $scriptDir 'udm-wan-speed-monitor-1.0.exe') $installDir -Force
+Copy-Item (Join-Path $scriptDir 'udm-wan-speed-monitor-1.0.1.exe') $installDir -Force
 Copy-Item (Join-Path $scriptDir 'udm-wan-speed-monitor-v2.ico') $installDir -Force
 Copy-Item (Join-Path $scriptDir 'uninstall.ps1') $installDir -Force
 

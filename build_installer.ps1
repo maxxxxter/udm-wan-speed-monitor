@@ -6,7 +6,7 @@ $targetInstaller = Join-Path $distDir 'UDM-WAN-Speed-Monitor-Installer.exe'
 $sedPath = Join-Path $scriptDir 'installer\udm-wan-speed-monitor.sed'
 
 New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null
-Copy-Item (Join-Path $distDir 'udm-wan-speed-monitor-1.0.exe') $payloadDir -Force
+Copy-Item (Join-Path $distDir 'udm-wan-speed-monitor-1.0.1.exe') $payloadDir -Force
 Copy-Item (Join-Path $distDir 'udm-wan-speed-monitor-v2.ico') $payloadDir -Force
 Copy-Item (Join-Path $scriptDir 'install.ps1') $payloadDir -Force
 Copy-Item (Join-Path $scriptDir 'uninstall.ps1') $payloadDir -Force
@@ -36,7 +36,7 @@ AdminQuietInstCmd=install.cmd
 UserQuietInstCmd=install.cmd
 SourceFiles=SourceFiles
 [Strings]
-FILE0=udm-wan-speed-monitor-1.0.exe
+FILE0=udm-wan-speed-monitor-1.0.1.exe
 FILE1=udm-wan-speed-monitor-v2.ico
 FILE2=install.ps1
 FILE3=uninstall.ps1

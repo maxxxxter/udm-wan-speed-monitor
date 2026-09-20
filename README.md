@@ -1,7 +1,7 @@
 # UDM WAN Speed Monitor
 
-[![Download MSI](https://img.shields.io/badge/Download-MSI%20Installer-00c853?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/maxxxxter/udm-wan-speed-monitor/raw/main/dist/UDM-WAN-Speed-Monitor-1.0.msi)
-[![Download EXE](https://img.shields.io/badge/Download-Portable%20EXE-0078d4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/maxxxxter/udm-wan-speed-monitor/raw/main/dist/udm-wan-speed-monitor-1.0.exe)
+[![Download MSI](https://img.shields.io/badge/Download-MSI%20Installer-00c853?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/maxxxxter/udm-wan-speed-monitor/raw/main/dist/UDM-WAN-Speed-Monitor-1.0.1.msi)
+[![Download EXE](https://img.shields.io/badge/Download-Portable%20EXE-0078d4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/maxxxxter/udm-wan-speed-monitor/raw/main/dist/udm-wan-speed-monitor-1.0.1.exe)
 
 Desktop-App fuer Windows, die den aktuellen WAN-Downlink und Uplink deiner UDM Pro Max anzeigt.
 
@@ -31,7 +31,7 @@ Desktop-App fuer Windows, die den aktuellen WAN-Downlink und Uplink deiner UDM P
 - `build_release.ps1`: baut die Release-EXE
 - `build_msi.ps1`: baut den klassischen MSI-Installer
 - `sign_release.ps1`: signiert EXE und MSI mit signtool.exe
-- `dist/UDM-WAN-Speed-Monitor-1.0.msi`: MSI-Installer fuer Windows
+- `dist/UDM-WAN-Speed-Monitor-1.0.1.msi`: MSI-Installer fuer Windows
 - `generate_checksums.ps1`: erzeugt SHA256-Pruefsummen fuer die Releases
 - `dist/SHA256SUMS.txt`: SHA256-Pruefsummen der Release-Dateien
 
@@ -55,6 +55,6 @@ CC BY 4.0
 - Unter Windows kannst du das lokal so pruefen:
 
 ```powershell
-Get-FileHash .\UDM-WAN-Speed-Monitor-1.0.msi -Algorithm SHA256
-Get-FileHash .\udm-wan-speed-monitor-1.0.exe -Algorithm SHA256
+Get-FileHash .\UDM-WAN-Speed-Monitor-1.0.1.msi -Algorithm SHA256
+Get-FileHash .\udm-wan-speed-monitor-1.0.1.exe -Algorithm SHA256
 ```
