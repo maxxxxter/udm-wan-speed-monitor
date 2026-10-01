@@ -19,6 +19,8 @@ Desktop-App fuer Windows, die den aktuellen WAN-Downlink und Uplink deiner UDM P
 - Live-Tray-Symbol: Im Tray zeigen zwei Balken Down- und Uplink, der Tooltip die aktuellen Werte und den Ping. Ein roter Rahmen signalisiert einen Ausfall
 - Ausfallprotokoll: Leitungsausfaelle, Wiederherstellungen (mit Dauer) und Verbindungsabbrueche zur UDM landen in `ereignisse.csv` (Excel-freundlich) und als Windows-Benachrichtigung, solange die App im Tray liegt. Oeffnen ueber `Datei` oder das Tray-Menue
 - Durchschnitt und Spitze der letzten 5 Minuten unter jedem Graphen
+- Bufferbloat-Erkennung: Die App vergleicht den Ping bei ruhiger Leitung mit dem Ping unter Last. Steigt er um 30 ms oder mehr, erscheint im WAN-Titel `Last +X ms` mit Note (A+ bis D), ein Eintrag im Ausfallprotokoll und der Tipp, Smart Queues in der UDM zu aktivieren
+- Top-Verbraucher: Unter den Graphen stehen die drei Geraete mit dem hoechsten aktuellen Durchsatz. Abschaltbar in den Einstellungen
 - Falsches Passwort stoppt das Monitoring sofort, damit die UDM das Konto nicht wegen Fehlversuchen sperrt
 
 ## Start

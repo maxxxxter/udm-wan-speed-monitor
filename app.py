@@ -46,6 +46,9 @@ MAX_CONSECUTIVE_ERRORS = 3
 LOGOUT_TIMEOUT_SECONDS = 1.5
 EVENT_LOG_PATH = APPDATA_DIR / 'ereignisse.csv'
 GATEWAY_DEVICE_TYPES = {'udm', 'ugw', 'uxg', 'ucg'}
+TOP_CLIENTS_EVERY_N_POLLS = 3
+TOP_CLIENTS_COUNT = 3
+BUFFERBLOAT_ALERT_MS = 30.0
 MIN_WIDTH = 220
 MIN_HEIGHT = 120
 BASE_WIDTH = 1180
@@ -72,6 +75,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     'window_y': 120,
     'cert_host': '',
     'cert_fingerprint': '',
+    'show_top_clients': True,
 }
 
 STARTUP_DIR = Path(os.environ.get('APPDATA', str(Path.home()))) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs' / 'Startup'
@@ -101,6 +105,8 @@ class WanReading:
 @dataclass(slots=True)
 class WanSnapshot:
     readings: list[WanReading] = field(default_factory=list)
+    # None heisst: in dieser Runde nicht abgefragt, die letzte Anzeige bleibt stehen.
+    top_clients: list[tuple[str, float]] | None = None
 
 
 class UdmApiError(RuntimeError):
@@ -141,6 +147,63 @@ def format_duration(seconds: float) -> str:
 
 def fingerprint_label(fingerprint: str) -> str:
     return ':'.join(fingerprint[i:i + 2] for i in range(0, min(len(fingerprint), 32), 2)).upper() + '...'
+
+
+def ping_to_float(ping_ms: str | None) -> float | None:
+    try:
+        return float(str(ping_ms).split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def bufferbloat_grade(extra_ms: float) -> str:
+    """Bewertung der Zusatzlatenz unter Last, angelehnt an gaengige Bufferbloat-Tests."""
+    if extra_ms < 5:
+        return 'A+'
+    if extra_ms < 30:
+        return 'A'
+    if extra_ms < 60:
+        return 'B'
+    if extra_ms < 200:
+        return 'C'
+    return 'D'
+
+
+class BufferbloatTracker:
+    """Vergleicht den Ping bei ruhiger Leitung mit dem Ping unter Last.
+
+    Steigt die Latenz unter Last deutlich an, puffert der Router oder das Modem zu viel (Bufferbloat).
+    Videocalls und Spiele ruckeln dann, sobald jemand etwas herunterlaedt. Smart Queues auf der UDM helfen dagegen.
+    """
+
+    IDLE_LOAD = 0.2
+    BUSY_LOAD = 0.6
+    MIN_BUSY_BPS = 5_000_000.0
+    MIN_IDLE_SAMPLES = 5
+    MIN_BUSY_SAMPLES = 3
+
+    def __init__(self, window_seconds: float = HISTORY_WINDOW_SECONDS) -> None:
+        self.window_seconds = window_seconds
+        self.samples: deque[tuple[float, float, float]] = deque()
+
+    def add(self, timestamp: float, ping_ms: float | None, throughput_bps: float) -> None:
+        if ping_ms is None:
+            return
+        self.samples.append((timestamp, ping_ms, throughput_bps))
+        while self.samples and timestamp - self.samples[0][0] > self.window_seconds:
+            self.samples.popleft()
+
+    def extra_latency_ms(self) -> float | None:
+        if not self.samples:
+            return None
+        peak = max(sample[2] for sample in self.samples)
+        if peak < self.MIN_BUSY_BPS:
+            return None
+        idle = sorted(ping for _, ping, load in self.samples if load <= peak * self.IDLE_LOAD)
+        busy = sorted(ping for _, ping, load in self.samples if load >= peak * self.BUSY_LOAD and load >= self.MIN_BUSY_BPS)
+        if len(idle) < self.MIN_IDLE_SAMPLES or len(busy) < self.MIN_BUSY_SAMPLES:
+            return None
+        return max(0.0, busy[len(busy) // 2] - idle[len(idle) // 2])
 
 
 class PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -241,6 +304,7 @@ class ConfigStore:
             'window_y': int(config.get('window_y', 120)),
             'cert_host': str(config.get('cert_host', '')),
             'cert_fingerprint': str(config.get('cert_fingerprint', '')),
+            'show_top_clients': bool(config.get('show_top_clients', True)),
             'password_encrypted': '',
         }
         if data['remember_password'] and config.get('password'):
@@ -286,6 +350,7 @@ class UdmClient:
         self.csrf_token = ''
         self.logged_in = False
         self.gateway_mac = ''
+        self.poll_count = 0
         self.observed_fingerprint = ''
         host = config.get('host', '')
         self.pinned_fingerprint = config.get('cert_fingerprint', '') if config.get('cert_host') == host else ''
@@ -327,7 +392,38 @@ class UdmClient:
             readings = self._parse_sysinfo(self._get_json('/proxy/network/api/s/default/stat/sysinfo'))
         if not readings:
             raise UdmApiError('Keine WAN-Durchsatzdaten gefunden.')
-        return WanSnapshot(readings=self._normalize_wan_names(readings))
+        top_clients = None
+        if self.config.get('show_top_clients', True) and self.poll_count % TOP_CLIENTS_EVERY_N_POLLS == 0:
+            top_clients = self.fetch_top_clients()
+        self.poll_count += 1
+        return WanSnapshot(readings=self._normalize_wan_names(readings), top_clients=top_clients)
+
+    def fetch_top_clients(self, limit: int = TOP_CLIENTS_COUNT) -> list[tuple[str, float]] | None:
+        """Die Geraete mit dem hoechsten aktuellen Durchsatz (Down + Up). Fehler hier stoppen das WAN-Monitoring nicht."""
+        try:
+            payload = self._get_json('/proxy/network/api/s/default/stat/sta')
+        except AuthenticationError:
+            raise
+        except UdmApiError:
+            return None
+        clients: list[tuple[str, float]] = []
+        for item in payload.get('data', []) if isinstance(payload, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            # Kabelgebundene Clients melden ihre Raten mit wired-Praefix, WLAN-Clients ohne.
+            wired_keys = ('wired-rx_bytes-r', 'wired-tx_bytes-r')
+            keys = wired_keys if any(key in item for key in wired_keys) else ('rx_bytes-r', 'tx_bytes-r')
+            rate = 0.0
+            for key in keys:
+                value = item.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                    rate += float(value) * 8.0
+            if rate <= 0:
+                continue
+            name = str(item.get('name') or item.get('hostname') or item.get('ip') or item.get('mac') or '?').strip()
+            clients.append((name, rate))
+        clients.sort(key=lambda entry: entry[1], reverse=True)
+        return clients[:limit]
 
     def _fetch_gateway_devices(self) -> Any:
         """stat/device liefert alle Access Points und Switches. Nach dem ersten Abruf wird nur noch das Gateway geholt."""
@@ -735,6 +831,8 @@ class MonitorApp:
         self.connection_lost_since: float | None = None
         self.tray_history: deque[tuple[float, float]] = deque(maxlen=int(HISTORY_WINDOW_SECONDS / DEFAULT_POLL_SECONDS))
         self.tray_tooltip = 'UDM WAN Speed Monitor'
+        self.bufferbloat = {'WAN 1': BufferbloatTracker(), 'WAN 2': BufferbloatTracker()}
+        self.bufferbloat_alerted: set[str] = set()
         self.last_window_geometry = {
             'window_width': initial_width,
             'window_height': initial_height,
@@ -758,12 +856,15 @@ class MonitorApp:
         self.show_wan2_var = tk.BooleanVar(value=bool(self.config.get('show_wan2', False)))
         self.autostart_var = tk.BooleanVar(value=bool(self.config.get('autostart', False)))
         self.minimize_to_tray_var = tk.BooleanVar(value=bool(self.config.get('minimize_to_tray', True)))
+        self.show_top_clients_var = tk.BooleanVar(value=bool(self.config.get('show_top_clients', True)))
+        self.top_clients_var = tk.StringVar(value='')
 
         self.scaled_widgets: list[tuple[tk.Widget, str, int, str]] = []
         self._build_ui()
         self.root.overrideredirect(True)
         self.root.attributes('-topmost', self.always_on_top_var.get())
         self._apply_wan2_visibility()
+        self._apply_top_clients_visibility()
         self._apply_autostart()
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
         self.root.bind('<Configure>', self._on_resize)
@@ -900,6 +1001,9 @@ class MonitorApp:
         self.wan2_upload_panel = GraphPanel(self.wan2_panel, 'UPLINK', NEON_BLUE, self.wan2_upload_var)
         self.wan2_upload_panel.grid(row=2, column=0, sticky='nsew')
 
+        self.top_clients_label = self._var_label(self.content, self.top_clients_var, '#9fb3c8', BG, 'Consolas', 12, 'normal')
+        self.top_clients_label.grid(row=1, column=0, columnspan=2, sticky='ew', padx=4, pady=(6, 0))
+
         footer = tk.Frame(shell, bg=BG)
         footer.grid(row=2, column=0, sticky='ew', pady=(8, 0))
         footer.columnconfigure(0, weight=1)
@@ -955,6 +1059,13 @@ class MonitorApp:
             self.wan2_upload_var.set('--')
             self.wan2_ip_var.set('WAN 2   Ping --')
         self._layout_graphs()
+
+    def _apply_top_clients_visibility(self) -> None:
+        if self.show_top_clients_var.get():
+            self.top_clients_label.grid()
+        else:
+            self.top_clients_label.grid_remove()
+            self.top_clients_var.set('')
 
     def _autostart_command(self) -> str:
         if getattr(sys, 'frozen', False):
@@ -1028,11 +1139,13 @@ class MonitorApp:
         topmost_check = self._check(panel, 'Immer im Vordergrund', self.always_on_top_var)
         topmost_check.grid(row=11, column=0, sticky='w', padx=10, pady=(2, 2))
         tray_check = self._check(panel, 'Beim Minimieren in Tray', self.minimize_to_tray_var)
-        tray_check.grid(row=12, column=0, sticky='w', padx=10, pady=(2, 4))
+        tray_check.grid(row=12, column=0, sticky='w', padx=10, pady=(2, 2))
+        top_clients_check = self._check(panel, 'Top-Verbraucher anzeigen', self.show_top_clients_var)
+        top_clients_check.grid(row=13, column=0, sticky='w', padx=10, pady=(2, 4))
         save_button = self._button(panel, 'Speichern', self.save_settings, NEON_GREEN, '#03120d')
-        save_button.grid(row=13, column=0, sticky='ew', padx=10, pady=(6, 6))
+        save_button.grid(row=14, column=0, sticky='ew', padx=10, pady=(6, 6))
         logout_button = self._button(panel, 'Abmelden', self.logout_and_clear_session, '#111827', '#dbe8f7')
-        logout_button.grid(row=14, column=0, sticky='ew', padx=10, pady=(0, 8))
+        logout_button.grid(row=15, column=0, sticky='ew', padx=10, pady=(0, 8))
 
         self.options_hint = hint
         self.save_button = save_button
@@ -1090,6 +1203,7 @@ class MonitorApp:
             'show_wan2': bool(self.show_wan2_var.get()),
             'autostart': bool(self.autostart_var.get()),
             'minimize_to_tray': bool(self.minimize_to_tray_var.get()),
+            'show_top_clients': bool(self.show_top_clients_var.get()),
             'cert_host': self.config.get('cert_host', ''),
             'cert_fingerprint': self.config.get('cert_fingerprint', ''),
             **self.last_window_geometry,
@@ -1099,6 +1213,7 @@ class MonitorApp:
         if self.settings_window is not None and self.settings_window.winfo_exists():
             self.settings_window.attributes('-topmost', self.always_on_top_var.get())
         self._apply_wan2_visibility()
+        self._apply_top_clients_visibility()
         if not self.show_wan2_var.get():
             self.wan_online.pop('WAN 2', None)
             self.wan_offline_since.pop('WAN 2', None)
@@ -1145,6 +1260,7 @@ class MonitorApp:
         self.config['show_wan2'] = bool(self.show_wan2_var.get())
         self.config['autostart'] = bool(self.autostart_var.get())
         self.config['minimize_to_tray'] = bool(self.minimize_to_tray_var.get())
+        self.config['show_top_clients'] = bool(self.show_top_clients_var.get())
         self.config.update(self.last_window_geometry)
         if self._has_credentials(self.config):
             ConfigStore.save(self.config)
@@ -1206,9 +1322,13 @@ class MonitorApp:
             dirty_panels.add(upload_panel)
             if reading.name == 'WAN 1' or self.show_wan2_var.get():
                 self._track_wan_state(reading.name, reading.online)
+            extra_latency = self._track_bufferbloat(reading)
             if reading.online is False:
                 ip_var.set(f'{reading.name}   OFFLINE')
                 title_label.configure(fg='#ff4d4f')
+            elif extra_latency is not None and extra_latency >= BUFFERBLOAT_ALERT_MS:
+                ip_var.set(f"{reading.name}   Ping {reading.ping_ms or '--'}   Last +{extra_latency:.0f} ms ({bufferbloat_grade(extra_latency)})")
+                title_label.configure(fg='#ffb020')
             else:
                 ip_var.set(f"{reading.name}   Ping {reading.ping_ms or '--'}")
                 title_label.configure(fg=NEON_GREEN)
@@ -1226,11 +1346,29 @@ class MonitorApp:
             ip_var.set(f"{name}   Ping --")
         for panel in dirty_panels:
             panel.redraw()
+        if snapshot.top_clients is not None and self.show_top_clients_var.get():
+            parts = [f'{name} {format_rate(rate)}' for name, rate in snapshot.top_clients]
+            self.top_clients_var.set('Top   ' + '   \u00b7   '.join(parts) if parts else 'Top   keine aktiven Geraete')
         self.tray_history.append((total_down, total_up))
         # Windows kuerzt Tray-Tooltips auf 127 Zeichen.
         self.tray_tooltip = '\n'.join(tooltip_lines)[:127]
         self._update_tray()
         self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
+
+    def _track_bufferbloat(self, reading: WanReading) -> float | None:
+        tracker = self.bufferbloat.get(reading.name)
+        if tracker is None:
+            return None
+        tracker.add(reading.timestamp, ping_to_float(reading.ping_ms), reading.download_bps + reading.upload_bps)
+        extra = tracker.extra_latency_ms()
+        if extra is None:
+            return None
+        if extra >= BUFFERBLOAT_ALERT_MS and reading.name not in self.bufferbloat_alerted:
+            self.bufferbloat_alerted.add(reading.name)
+            self._report_event('Bufferbloat erkannt', reading.name, f'Ping unter Last +{extra:.0f} ms (Note {bufferbloat_grade(extra)}). Tipp: Smart Queues in der UDM aktivieren')
+        elif extra < BUFFERBLOAT_ALERT_MS / 2:
+            self.bufferbloat_alerted.discard(reading.name)
+        return extra
 
     def _track_wan_state(self, name: str, online: bool | None) -> None:
         if online is None:
