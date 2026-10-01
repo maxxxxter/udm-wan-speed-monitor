@@ -15,6 +15,13 @@ Desktop-App fuer Windows, die den aktuellen WAN-Downlink und Uplink deiner UDM P
 - Passwort wird per Windows-DPAPI verschluesselt gespeichert, nicht im Klartext
 - Abmelden-Funktion zum Wechseln von Router, Benutzer oder Passwort
 - Kein API-Key noetig, solange die UDM-Login-Daten vorhanden sind
+- Zertifikats-Pinning (Trust on First Use): Das selbstsignierte Zertifikat der UDM wird beim ersten Kontakt gemerkt. Meldet sich spaeter ein anderes Zertifikat, wird vor dem Senden des Passworts nachgefragt
+- Live-Tray-Symbol: Im Tray zeigen zwei Balken Down- und Uplink, der Tooltip die aktuellen Werte und den Ping. Ein roter Rahmen signalisiert einen Ausfall
+- Ausfallprotokoll: Leitungsausfaelle, Wiederherstellungen (mit Dauer) und Verbindungsabbrueche zur UDM landen in `ereignisse.csv` (Excel-freundlich) und als Windows-Benachrichtigung, solange die App im Tray liegt. Oeffnen ueber `Datei` oder das Tray-Menue
+- Durchschnitt und Spitze der letzten 5 Minuten unter jedem Graphen
+- Bufferbloat-Erkennung: Die App vergleicht den Ping bei ruhiger Leitung mit dem Ping unter Last. Steigt er um 30 ms oder mehr, erscheint im WAN-Titel `Last +X ms` mit Note (A+ bis D), ein Eintrag im Ausfallprotokoll und der Tipp, Smart Queues in der UDM zu aktivieren
+- Top-Verbraucher: Unter den Graphen stehen die drei Geraete mit dem hoechsten aktuellen Durchsatz. Abschaltbar in den Einstellungen
+- Falsches Passwort stoppt das Monitoring sofort, damit die UDM das Konto nicht wegen Fehlversuchen sperrt
 
 ## Start
 
@@ -27,6 +34,7 @@ Desktop-App fuer Windows, die den aktuellen WAN-Downlink und Uplink deiner UDM P
 
 - `app.py`: Anwendung
 - `config.json`: wird unter `%LOCALAPPDATA%\UDM WAN Speed Monitor` automatisch angelegt
+- `ereignisse.csv`: Ausfallprotokoll im selben Ordner
 - `run-udm-wan-speed-monitor.bat`: Starter fuer Windows
 - `build_release.ps1`: baut die Release-EXE
 - `build_msi.ps1`: baut den klassischen MSI-Installer
