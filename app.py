@@ -1,4 +1,7 @@
-﻿import ctypes
+﻿import csv
+import ctypes
+import hashlib
+import http.client
 import json
 import os
 import ssl
@@ -6,7 +9,6 @@ import sys
 import threading
 import time
 import tkinter as tk
-import winreg
 from collections import deque
 from ctypes import wintypes
 from dataclasses import dataclass, field
@@ -17,6 +19,7 @@ from urllib import error, request
 
 import pystray
 from PIL import Image as PILImage
+from PIL import ImageDraw
 from pystray import MenuItem as TrayItem
 
 APP_DIR = Path(__file__).resolve().parent
@@ -40,6 +43,9 @@ HISTORY_WINDOW_SECONDS = 300
 DEFAULT_POLL_SECONDS = 2.0
 REQUEST_TIMEOUT_SECONDS = 5.0
 MAX_CONSECUTIVE_ERRORS = 3
+LOGOUT_TIMEOUT_SECONDS = 1.5
+EVENT_LOG_PATH = APPDATA_DIR / 'ereignisse.csv'
+GATEWAY_DEVICE_TYPES = {'udm', 'ugw', 'uxg', 'ucg'}
 MIN_WIDTH = 220
 MIN_HEIGHT = 120
 BASE_WIDTH = 1180
@@ -64,6 +70,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     'window_height': BASE_HEIGHT,
     'window_x': 120,
     'window_y': 120,
+    'cert_host': '',
+    'cert_fingerprint': '',
 }
 
 STARTUP_DIR = Path(os.environ.get('APPDATA', str(Path.home()))) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs' / 'Startup'
@@ -77,9 +85,6 @@ class DATA_BLOB(ctypes.Structure):
 crypt32 = ctypes.windll.crypt32
 kernel32 = ctypes.windll.kernel32
 CRYPTPROTECT_UI_FORBIDDEN = 0x01
-DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-DWMWA_CAPTION_COLOR = 35
-DWMWA_TEXT_COLOR = 36
 
 
 @dataclass(slots=True)
@@ -90,6 +95,7 @@ class WanReading:
     source: str
     timestamp: float
     ping_ms: str = '--'
+    online: bool | None = None
 
 
 @dataclass(slots=True)
@@ -99,6 +105,94 @@ class WanSnapshot:
 
 class UdmApiError(RuntimeError):
     pass
+
+
+class AuthenticationError(UdmApiError):
+    """Login abgelehnt: weitere Versuche wuerden nur das Konto sperren."""
+
+
+class CertificateMismatchError(UdmApiError):
+    def __init__(self, expected: str, actual: str) -> None:
+        super().__init__('Das TLS-Zertifikat der UDM hat sich geaendert.')
+        self.expected = expected
+        self.actual = actual
+
+
+def format_rate(bps: float) -> str:
+    units = ['bit/s', 'Kbit/s', 'Mbit/s', 'Gbit/s']
+    value = float(bps)
+    index = 0
+    while value >= 1000 and index < len(units) - 1:
+        value /= 1000.0
+        index += 1
+    return f'{value:.2f} {units[index]}'
+
+
+def format_duration(seconds: float) -> str:
+    seconds = int(max(0, seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f'{hours} h {minutes} min'
+    if minutes:
+        return f'{minutes} min {secs} s'
+    return f'{secs} s'
+
+
+def fingerprint_label(fingerprint: str) -> str:
+    return ':'.join(fingerprint[i:i + 2] for i in range(0, min(len(fingerprint), 32), 2)).upper() + '...'
+
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Prueft den Zertifikats-Fingerprint direkt nach dem TLS-Handshake, bevor Daten (z.B. das Passwort) gesendet werden."""
+
+    def __init__(self, *args, verify_fingerprint=None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._verify_fingerprint = verify_fingerprint
+
+    def connect(self) -> None:
+        super().connect()
+        if self._verify_fingerprint is None:
+            return
+        der = self.sock.getpeercert(binary_form=True) or b''
+        try:
+            self._verify_fingerprint(hashlib.sha256(der).hexdigest())
+        except Exception:
+            self.close()
+            raise
+
+
+class PinnedHTTPSHandler(request.HTTPSHandler):
+    """UDMs nutzen selbstsignierte Zertifikate. Statt TLS komplett blind zu vertrauen, wird das Zertifikat beim ersten Kontakt gemerkt (Trust on First Use)."""
+
+    def __init__(self, verify_fingerprint) -> None:
+        super().__init__(context=ssl._create_unverified_context())
+        self._verify_fingerprint = verify_fingerprint
+
+    def https_open(self, req):
+        def factory(host, **kwargs):
+            return PinnedHTTPSConnection(host, verify_fingerprint=self._verify_fingerprint, **kwargs)
+        return self.do_open(factory, req, context=self._context)
+
+
+class EventLog:
+    """Schreibt Ausfaelle und Wiederherstellungen als CSV (Excel-freundlich mit Semikolon)."""
+
+    HEADER = ['Zeitpunkt', 'Ereignis', 'Leitung', 'Details']
+
+    def __init__(self, path: Path = EVENT_LOG_PATH) -> None:
+        self.path = path
+
+    def write(self, event: str, wan: str, detail: str = '') -> None:
+        try:
+            new_file = not self.path.exists()
+            with self.path.open('a', encoding='utf-8-sig' if new_file else 'utf-8', newline='') as handle:
+                writer = csv.writer(handle, delimiter=';')
+                if new_file:
+                    writer.writerow(self.HEADER)
+                writer.writerow([time.strftime('%Y-%m-%d %H:%M:%S'), event, wan, detail])
+        except OSError:
+            pass
 
 
 class ConfigStore:
@@ -145,11 +239,16 @@ class ConfigStore:
             'window_height': int(config.get('window_height', BASE_HEIGHT)),
             'window_x': int(config.get('window_x', 120)),
             'window_y': int(config.get('window_y', 120)),
+            'cert_host': str(config.get('cert_host', '')),
+            'cert_fingerprint': str(config.get('cert_fingerprint', '')),
             'password_encrypted': '',
         }
         if data['remember_password'] and config.get('password'):
             data['password_encrypted'] = ConfigStore._encrypt_password(config['password'])
-        CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        # Erst in eine Temp-Datei schreiben, damit ein Absturz beim Speichern die Konfiguration nicht zerstoert.
+        temp_path = CONFIG_PATH.with_suffix('.tmp')
+        temp_path.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        os.replace(temp_path, CONFIG_PATH)
 
     @staticmethod
     def _encrypt_password(password: str) -> str:
@@ -186,8 +285,17 @@ class UdmClient:
         self.config = config
         self.csrf_token = ''
         self.logged_in = False
-        handlers: list[Any] = [request.HTTPCookieProcessor(), request.HTTPSHandler(context=ssl._create_unverified_context())]
+        self.gateway_mac = ''
+        self.observed_fingerprint = ''
+        host = config.get('host', '')
+        self.pinned_fingerprint = config.get('cert_fingerprint', '') if config.get('cert_host') == host else ''
+        handlers: list[Any] = [request.HTTPCookieProcessor(), PinnedHTTPSHandler(self._check_fingerprint)]
         self.opener = request.build_opener(*handlers)
+
+    def _check_fingerprint(self, fingerprint: str) -> None:
+        self.observed_fingerprint = fingerprint
+        if self.pinned_fingerprint and fingerprint != self.pinned_fingerprint:
+            raise CertificateMismatchError(self.pinned_fingerprint, fingerprint)
 
     def login(self) -> None:
         payload = json.dumps({'username': self.config['username'], 'password': self.config['password']}).encode('utf-8')
@@ -210,18 +318,40 @@ class UdmClient:
     def fetch_wan_snapshot(self) -> WanSnapshot:
         if not self.logged_in:
             self.login()
-        health_payload = self._get_json('/proxy/network/api/s/default/stat/health')
-        device_payload = self._get_json('/proxy/network/api/s/default/stat/device')
-        sysinfo_payload = self._get_json('/proxy/network/api/s/default/stat/sysinfo')
-
         readings: list[WanReading] = []
-        readings.extend(self._parse_health(health_payload))
-        readings.extend(self._parse_devices(device_payload))
-        readings.extend(self._parse_sysinfo(sysinfo_payload))
+        readings.extend(self._parse_health(self._get_json('/proxy/network/api/s/default/stat/health')))
+        readings.extend(self._parse_devices(self._fetch_gateway_devices()))
         readings = self._dedupe_readings(readings)
+        if not readings:
+            # sysinfo liefert nur selten WAN-Daten, deshalb nur als Rueckfall abfragen.
+            readings = self._parse_sysinfo(self._get_json('/proxy/network/api/s/default/stat/sysinfo'))
         if not readings:
             raise UdmApiError('Keine WAN-Durchsatzdaten gefunden.')
         return WanSnapshot(readings=self._normalize_wan_names(readings))
+
+    def _fetch_gateway_devices(self) -> Any:
+        """stat/device liefert alle Access Points und Switches. Nach dem ersten Abruf wird nur noch das Gateway geholt."""
+        if self.gateway_mac:
+            try:
+                return self._get_json(f'/proxy/network/api/s/default/stat/device/{self.gateway_mac}')
+            except AuthenticationError:
+                raise
+            except UdmApiError:
+                if not self.logged_in:
+                    raise
+                self.gateway_mac = ''
+        payload = self._get_json('/proxy/network/api/s/default/stat/device')
+        if not isinstance(payload, dict):
+            return payload
+        devices = payload.get('data', [])
+        gateways = [item for item in devices if isinstance(item, dict) and self._is_gateway(item)]
+        if len(gateways) == 1 and gateways[0].get('mac'):
+            self.gateway_mac = str(gateways[0]['mac']).lower()
+        return {**payload, 'data': gateways} if gateways else payload
+
+    @staticmethod
+    def _is_gateway(item: dict[str, Any]) -> bool:
+        return str(item.get('type', '')).lower() in GATEWAY_DEVICE_TYPES or 'wan1' in item
 
     def _get_json(self, path: str) -> Any:
         response = self._request(path)
@@ -241,9 +371,11 @@ class UdmClient:
         try:
             return self.opener.open(req, timeout=REQUEST_TIMEOUT_SECONDS)
         except error.HTTPError as exc:
-            if exc.code == 401 and path != '/api/auth/login':
-                self.logged_in = False
             body = exc.read().decode('utf-8', errors='ignore')
+            if path == '/api/auth/login' and exc.code in (400, 401, 403):
+                raise AuthenticationError('Anmeldung abgelehnt. Bitte Benutzername und Passwort pruefen.') from exc
+            if exc.code == 401:
+                self.logged_in = False
             raise UdmApiError(f'HTTP {exc.code} bei {path}: {body[:160]}') from exc
         except error.URLError as exc:
             raise UdmApiError(f'Verbindung zu {url} fehlgeschlagen: {exc.reason}') from exc
@@ -314,11 +446,22 @@ class UdmClient:
         download = self._extract_rate(item, 'download')
         upload = self._extract_rate(item, 'upload')
         ping_ms = self._extract_ping_ms(item)
+        online = self._extract_online(item)
         if download is None or upload is None:
-            if name is None or ping_ms in {'', '--'}:
+            if name is None or (ping_ms in {'', '--'} and online is None):
                 return None
-            return WanReading(name, float(download or 0.0), float(upload or 0.0), source, time.time(), ping_ms)
-        return WanReading(name, download, upload, source, time.time(), ping_ms)
+            return WanReading(name, float(download or 0.0), float(upload or 0.0), source, time.time(), ping_ms, online)
+        return WanReading(name, download, upload, source, time.time(), ping_ms, online)
+
+    @staticmethod
+    def _extract_online(item: dict[str, Any]) -> bool | None:
+        up = item.get('up')
+        if isinstance(up, bool):
+            return up
+        status = item.get('status')
+        if isinstance(status, str) and status:
+            return status.strip().lower() in {'ok', 'online', 'connected', 'up'}
+        return None
 
     def _wan_name(self, item: dict[str, Any], index: int) -> str:
         return self._wan_label_from_context(item, ()) or f'WAN {index}'
@@ -327,7 +470,8 @@ class UdmClient:
         ping_ms = preferred.ping_ms if preferred.ping_ms not in {'', '--'} else other.ping_ms
         if ping_ms in {'', '--'}:
             ping_ms = '--'
-        return WanReading(preferred.name, preferred.download_bps, preferred.upload_bps, preferred.source, preferred.timestamp, ping_ms)
+        online = preferred.online if preferred.online is not None else other.online
+        return WanReading(preferred.name, preferred.download_bps, preferred.upload_bps, preferred.source, preferred.timestamp, ping_ms, online)
 
     def _dedupe_readings(self, readings: list[WanReading]) -> list[WanReading]:
         deduped: dict[str, WanReading] = {}
@@ -365,7 +509,7 @@ class UdmClient:
                 reading = fallback.pop(0)
             if reading is None:
                 continue
-            normalized.append(WanReading(label, reading.download_bps, reading.upload_bps, reading.source, reading.timestamp, reading.ping_ms))
+            normalized.append(WanReading(label, reading.download_bps, reading.upload_bps, reading.source, reading.timestamp, reading.ping_ms, reading.online))
         return normalized
 
     def _extract_ping_ms(self, item: dict[str, Any]) -> str:
@@ -417,10 +561,13 @@ class UdmClient:
             return f'{value:.1f} ms'
         return f'{value:.2f} ms'
 
+    NON_RATE_KEY_PARTS = ('xput', 'uptime', 'packets', 'errors', 'dropped', 'retries', 'speedtest', 'max_speed', 'uplink', 'update', 'group', 'multicast', 'broadcast', 'duplex')
+
     def _extract_rate(self, item: dict[str, Any], direction: str) -> float | None:
+        # xput_* sind Speedtest-Ergebnisse in Mbit/s, keine Live-Werte, und bleiben deshalb aussen vor.
         aliases = {
-            'download': ['download_bps', 'xput_down', 'speed_down', 'rx_rate', 'rx_bytes-r', 'wan_rx_bps', 'throughput_down'],
-            'upload': ['upload_bps', 'xput_up', 'speed_up', 'tx_rate', 'tx_bytes-r', 'wan_tx_bps', 'throughput_up'],
+            'download': ['download_bps', 'speed_down', 'rx_rate', 'rx_bytes-r', 'wan_rx_bps', 'throughput_down'],
+            'upload': ['upload_bps', 'speed_up', 'tx_rate', 'tx_bytes-r', 'wan_tx_bps', 'throughput_up'],
         }
         for key in aliases[direction]:
             value = self._to_bps(item.get(key), key)
@@ -428,6 +575,8 @@ class UdmClient:
                 return value
         for key, raw in item.items():
             lowered = str(key).lower()
+            if any(part in lowered for part in self.NON_RATE_KEY_PARTS):
+                continue
             if direction == 'download' and any(part in lowered for part in ['download', 'down', 'rx']):
                 value = self._to_bps(raw, lowered)
                 if value is not None:
@@ -505,9 +654,22 @@ class GraphPanel(tk.Frame):
         if redraw:
             self.redraw()
 
+    def peak(self) -> float:
+        return max((value for _, value in self.history), default=0.0)
+
+    def _update_stats(self) -> None:
+        if not self.history:
+            text = 'Verlauf der letzten 5 Minuten'
+        else:
+            average = sum(value for _, value in self.history) / len(self.history)
+            text = f'5 Min   \u00d8 {format_rate(average)}   Spitze {format_rate(self.peak())}'
+        if self.info_label.cget('text') != text:
+            self.info_label.configure(text=text)
+
     def redraw(self) -> None:
         now = time.time()
         self._trim(now)
+        self._update_stats()
         if self.compact_mode or not self.canvas.winfo_ismapped():
             return
         width = max(80, self.canvas.winfo_width())
@@ -567,6 +729,12 @@ class MonitorApp:
         self.settings_open_in_tray = False
         self.in_tray = False
         self.exiting = False
+        self.event_log = EventLog()
+        self.wan_online: dict[str, bool] = {}
+        self.wan_offline_since: dict[str, float] = {}
+        self.connection_lost_since: float | None = None
+        self.tray_history: deque[tuple[float, float]] = deque(maxlen=int(HISTORY_WINDOW_SECONDS / DEFAULT_POLL_SECONDS))
+        self.tray_tooltip = 'UDM WAN Speed Monitor'
         self.last_window_geometry = {
             'window_width': initial_width,
             'window_height': initial_height,
@@ -609,21 +777,38 @@ class MonitorApp:
         return None
 
     def _tray_image(self):
+        if self.tray_history:
+            return self._render_tray_image()
         icon_path = self._icon_path()
         if icon_path is None:
             return None
         return PILImage.open(icon_path)
 
-    def _windows_apps_dark_mode(self) -> bool:
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize') as key:
-                value, _ = winreg.QueryValueEx(key, 'AppsUseLightTheme')
-                return int(value) == 0
-        except Exception:
-            return True
+    def _render_tray_image(self):
+        """Zeichnet Down- und Uplink als zwei Balken ins Tray-Symbol, skaliert auf die Spitze der letzten 5 Minuten."""
+        size = 64
+        image = PILImage.new('RGBA', (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        offline = any(state is False for state in self.wan_online.values()) or self.connection_lost_since is not None
+        draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=10, fill=BG, outline='#ff4d4f' if offline else '#1f2937', width=4 if offline else 2)
+        down, up = self.tray_history[-1]
+        peak_down = max((point[0] for point in self.tray_history), default=0.0) or 1.0
+        peak_up = max((point[1] for point in self.tray_history), default=0.0) or 1.0
+        inner_top, inner_bottom = 8, size - 8
+        for left, value, peak, color in ((10, down, peak_down, NEON_GREEN), (36, up, peak_up, NEON_BLUE)):
+            height = max(3, int((inner_bottom - inner_top) * min(1.0, value / peak)))
+            draw.rectangle((left, inner_bottom - height, left + 17, inner_bottom), fill=color)
+        return image
 
-    def _apply_title_bar_theme(self) -> None:
-        return
+    def _update_tray(self) -> None:
+        if self.tray_icon is None:
+            return
+        try:
+            self.tray_icon.title = self.tray_tooltip
+            if self.tray_history:
+                self.tray_icon.icon = self._render_tray_image()
+        except Exception:
+            pass
 
     def _start_window_drag(self, event) -> None:
         self.drag_offset_x = event.x_root - self.root.winfo_x()
@@ -659,6 +844,7 @@ class MonitorApp:
 
         file_button = tk.Menubutton(header, text='Datei', bg='#0b1118', fg='#ffffff', activebackground='#182433', activeforeground='#ffffff', relief='flat', cursor='hand2')
         file_menu = tk.Menu(file_button, tearoff=False, bg='#111827', fg='#ffffff', activebackground='#24405a', activeforeground='#ffffff', font=('Segoe UI', 14))
+        file_menu.add_command(label='Ereignisprotokoll oeffnen', command=self.open_event_log)
         file_menu.add_command(label='Beenden', command=self._on_close)
         file_button.configure(menu=file_menu)
         file_button.grid(row=0, column=0, sticky='w', padx=(6, 2), pady=2)
@@ -904,12 +1090,18 @@ class MonitorApp:
             'show_wan2': bool(self.show_wan2_var.get()),
             'autostart': bool(self.autostart_var.get()),
             'minimize_to_tray': bool(self.minimize_to_tray_var.get()),
+            'cert_host': self.config.get('cert_host', ''),
+            'cert_fingerprint': self.config.get('cert_fingerprint', ''),
+            **self.last_window_geometry,
         }
         ConfigStore.save(self.config)
         self.root.attributes('-topmost', self.always_on_top_var.get())
         if self.settings_window is not None and self.settings_window.winfo_exists():
             self.settings_window.attributes('-topmost', self.always_on_top_var.get())
         self._apply_wan2_visibility()
+        if not self.show_wan2_var.get():
+            self.wan_online.pop('WAN 2', None)
+            self.wan_offline_since.pop('WAN 2', None)
         self._apply_autostart()
         self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
         self.stop_monitoring(silent=True)
@@ -943,14 +1135,19 @@ class MonitorApp:
     def logout_and_clear_session(self) -> None:
         self.stop_monitoring(silent=True)
         self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
-        self.config['options_visible'] = False
+        self.options_visible = False
+        self._persist_config()
+        self.open_settings_window(force=True)
+
+    def _persist_config(self) -> None:
+        self.config['options_visible'] = self.options_visible
+        self.config['always_on_top'] = bool(self.always_on_top_var.get())
         self.config['show_wan2'] = bool(self.show_wan2_var.get())
         self.config['autostart'] = bool(self.autostart_var.get())
         self.config['minimize_to_tray'] = bool(self.minimize_to_tray_var.get())
         self.config.update(self.last_window_geometry)
         if self._has_credentials(self.config):
             ConfigStore.save(self.config)
-        self.open_settings_window(force=True)
 
     def _poll_loop(self, generation: int, client: UdmClient) -> None:
         consecutive_errors = 0
@@ -958,8 +1155,17 @@ class MonitorApp:
             try:
                 snapshot = client.fetch_wan_snapshot()
                 consecutive_errors = 0
+                if not client.pinned_fingerprint and client.observed_fingerprint:
+                    client.pinned_fingerprint = client.observed_fingerprint
+                    self.root.after(0, self._remember_fingerprint, generation, client.observed_fingerprint)
                 self.root.after(0, self._apply_snapshot, generation, snapshot)
                 delay = DEFAULT_POLL_SECONDS
+            except CertificateMismatchError as exc:
+                self.root.after(0, self._handle_certificate_change, generation, exc.expected, exc.actual)
+                return
+            except AuthenticationError as exc:
+                self.root.after(0, self._handle_auth_failure, generation, str(exc))
+                return
             except Exception as exc:
                 consecutive_errors += 1
                 client.logged_in = False
@@ -976,60 +1182,153 @@ class MonitorApp:
         if generation != self.monitor_generation:
             return
         self.consecutive_errors = 0
+        if self.connection_lost_since is not None:
+            self._report_event('UDM wieder erreichbar', '-', f'Unterbrechung {format_duration(time.time() - self.connection_lost_since)}')
+            self.connection_lost_since = None
         slots = {
-            'WAN 1': (self.wan1_download_var, self.wan1_upload_var, self.wan1_download_panel, self.wan1_upload_panel, self.wan1_ip_var),
-            'WAN 2': (self.wan2_download_var, self.wan2_upload_var, self.wan2_download_panel, self.wan2_upload_panel, self.wan2_ip_var),
+            'WAN 1': (self.wan1_download_var, self.wan1_upload_var, self.wan1_download_panel, self.wan1_upload_panel, self.wan1_ip_var, self.wan1_title),
+            'WAN 2': (self.wan2_download_var, self.wan2_upload_var, self.wan2_download_panel, self.wan2_upload_panel, self.wan2_ip_var, self.wan2_title),
         }
         seen = set()
         dirty_panels: set[GraphPanel] = set()
+        total_down = total_up = 0.0
+        tooltip_lines = ['UDM WAN Speed Monitor']
         for reading in snapshot.readings:
             slot = slots.get(reading.name)
             if slot is None:
                 continue
-            download_var, upload_var, download_panel, upload_panel, ip_var = slot
-            download_var.set(self._format_rate(reading.download_bps))
-            upload_var.set(self._format_rate(reading.upload_bps))
+            download_var, upload_var, download_panel, upload_panel, ip_var, title_label = slot
+            download_var.set(format_rate(reading.download_bps))
+            upload_var.set(format_rate(reading.upload_bps))
             download_panel.add_point(reading.timestamp, reading.download_bps, redraw=False)
             upload_panel.add_point(reading.timestamp, reading.upload_bps, redraw=False)
             dirty_panels.add(download_panel)
             dirty_panels.add(upload_panel)
-            ip_var.set(f"{reading.name}   Ping {reading.ping_ms or '--'}")
+            if reading.name == 'WAN 1' or self.show_wan2_var.get():
+                self._track_wan_state(reading.name, reading.online)
+            if reading.online is False:
+                ip_var.set(f'{reading.name}   OFFLINE')
+                title_label.configure(fg='#ff4d4f')
+            else:
+                ip_var.set(f"{reading.name}   Ping {reading.ping_ms or '--'}")
+                title_label.configure(fg=NEON_GREEN)
+            total_down += reading.download_bps
+            total_up += reading.upload_bps
+            status = 'offline' if reading.online is False else reading.ping_ms
+            tooltip_lines.append(f'{reading.name}: \u2193{format_rate(reading.download_bps)} \u2191{format_rate(reading.upload_bps)} {status}')
             seen.add(reading.name)
         for name, slot in slots.items():
             if name in seen:
                 continue
-            download_var, upload_var, _, _, ip_var = slot
+            download_var, upload_var, _, _, ip_var, _ = slot
             download_var.set('--')
             upload_var.set('--')
             ip_var.set(f"{name}   Ping --")
         for panel in dirty_panels:
             panel.redraw()
+        self.tray_history.append((total_down, total_up))
+        # Windows kuerzt Tray-Tooltips auf 127 Zeichen.
+        self.tray_tooltip = '\n'.join(tooltip_lines)[:127]
+        self._update_tray()
         self.footer_var.set(f'CC BY 4.0 Maxxter {time.localtime().tm_year}')
+
+    def _track_wan_state(self, name: str, online: bool | None) -> None:
+        if online is None:
+            return
+        previous = self.wan_online.get(name)
+        self.wan_online[name] = online
+        if previous == online:
+            return
+        if not online:
+            self.wan_offline_since[name] = time.time()
+            self._report_event('Leitung offline', name, 'beim Start' if previous is None else '', notify=previous is not None)
+        elif previous is False:
+            since = self.wan_offline_since.pop(name, None)
+            self._report_event('Leitung wieder online', name, f'Ausfall {format_duration(time.time() - since)}' if since else '')
+
+    def _report_event(self, event: str, wan: str, detail: str = '', notify: bool = True) -> None:
+        self.event_log.write(event, wan, detail)
+        if not notify or self.tray_icon is None:
+            return
+        message = f'{wan}: {event}' if wan != '-' else event
+        try:
+            self.tray_icon.notify(f'{message} {detail}'.strip(), 'UDM WAN Speed Monitor')
+        except Exception:
+            pass
+
+    def open_event_log(self) -> None:
+        if not EVENT_LOG_PATH.exists():
+            self.event_log.write('Protokoll angelegt', '-', '')
+        try:
+            os.startfile(str(EVENT_LOG_PATH))
+        except OSError as exc:
+            messagebox.showerror('Ereignisprotokoll', f'Datei konnte nicht geoeffnet werden:\n{EVENT_LOG_PATH}\n\n{exc}', parent=self.root)
+
+    def _remember_fingerprint(self, generation: int, fingerprint: str) -> None:
+        if generation != self.monitor_generation or not fingerprint:
+            return
+        self.config['cert_host'] = self.config.get('host', '')
+        self.config['cert_fingerprint'] = fingerprint
+        self._persist_config()
+
+    def _bring_to_front(self) -> None:
+        if self.in_tray:
+            self._restore_from_tray()
+
+    def _handle_certificate_change(self, generation: int, expected: str, actual: str) -> None:
+        if generation != self.monitor_generation:
+            return
+        self.stop_monitoring(silent=True)
+        self.event_log.write('Zertifikat geaendert', '-', f'bisher {expected} jetzt {actual}')
+        self._bring_to_front()
+        trust = messagebox.askyesno(
+            'Zertifikat der UDM geaendert',
+            'Die UDM meldet sich mit einem anderen TLS-Zertifikat als bisher.\n\n'
+            f'Bisher: {fingerprint_label(expected)}\nJetzt:  {fingerprint_label(actual)}\n\n'
+            'Das ist normal nach einem Firmware-Update, Zuruecksetzen oder neuem Zertifikat. '
+            'Kommt es unerwartet, koennte jemand die Verbindung abfangen. Bis zur Bestaetigung wurde kein Passwort gesendet.\n\n'
+            'Dem neuen Zertifikat vertrauen und weiter ueberwachen?',
+            icon='warning',
+            parent=self.root,
+        )
+        if trust:
+            self.config['cert_host'] = self.config.get('host', '')
+            self.config['cert_fingerprint'] = actual
+            self._persist_config()
+            self.start_monitoring()
+        else:
+            self.footer_var.set('Monitoring gestoppt: Zertifikat nicht bestaetigt')
+
+    def _handle_auth_failure(self, generation: int, message: str) -> None:
+        if generation != self.monitor_generation:
+            return
+        self.stop_monitoring(silent=True)
+        self.footer_var.set('Anmeldung abgelehnt, Monitoring angehalten')
+        self._bring_to_front()
+        messagebox.showerror('Anmeldung fehlgeschlagen', f'{message}\n\nDas Monitoring wurde angehalten, damit die UDM das Konto nicht wegen wiederholter Fehlversuche sperrt.', parent=self.root)
+        self.open_settings_window(force=True)
 
     def _apply_error(self, generation: int, consecutive_errors: int, message: str) -> None:
         if generation != self.monitor_generation:
             return
         self.consecutive_errors = consecutive_errors
-        self.wan1_download_var.set('--')
-        self.wan1_upload_var.set('--')
-        self.wan2_download_var.set('--')
-        self.wan2_upload_var.set('--')
-        self.wan1_ip_var.set('WAN 1   Ping --')
-        self.wan2_ip_var.set('WAN 2   Ping --')
         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+            # Einzelne Aussetzer lassen die letzten Werte stehen, erst danach wird geleert.
+            self.wan1_download_var.set('--')
+            self.wan1_upload_var.set('--')
+            self.wan2_download_var.set('--')
+            self.wan2_upload_var.set('--')
+            self.wan1_ip_var.set('WAN 1   Ping --')
+            self.wan2_ip_var.set('WAN 2   Ping --')
+            if self.connection_lost_since is None:
+                self.connection_lost_since = time.time()
+                self._report_event('UDM nicht erreichbar', '-', message[:160])
+                self.tray_tooltip = 'UDM WAN Speed Monitor\nUDM nicht erreichbar'
+                self._update_tray()
             detail = message[:120] if message else 'UDM nicht erreichbar'
             self.footer_var.set(f'Verbindung unterbrochen, retry laeuft: {detail}')
         else:
             self.footer_var.set(f'Verbindung wird erneut aufgebaut ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS})')
-
-    def _format_rate(self, bps: float) -> str:
-        units = ['bit/s', 'Kbit/s', 'Mbit/s', 'Gbit/s']
-        value = float(bps)
-        index = 0
-        while value >= 1000 and index < len(units) - 1:
-            value /= 1000.0
-            index += 1
-        return f'{value:.2f} {units[index]}'
 
     def _remember_window_geometry(self) -> None:
         try:
@@ -1093,19 +1392,6 @@ class MonitorApp:
         except tk.TclError:
             pass
 
-    def toggle_always_on_top(self) -> None:
-        enabled = bool(self.always_on_top_var.get())
-        self.root.attributes('-topmost', enabled)
-        if self.settings_window is not None and self.settings_window.winfo_exists():
-            self.settings_window.attributes('-topmost', enabled)
-        self.config['always_on_top'] = enabled
-        self.config['show_wan2'] = bool(self.show_wan2_var.get())
-        self.config['autostart'] = bool(self.autostart_var.get())
-        self.config['minimize_to_tray'] = bool(self.minimize_to_tray_var.get())
-        self.config.update(self.last_window_geometry)
-        if self._has_credentials(self.config):
-            ConfigStore.save(self.config)
-
     def _hide_to_tray(self) -> None:
         if self.in_tray:
             return
@@ -1121,9 +1407,10 @@ class MonitorApp:
             self.settings_open_in_tray = False
         menu = pystray.Menu(
             TrayItem('Oeffnen', lambda: self.root.after(0, self._restore_from_tray), default=True),
+            TrayItem('Ereignisprotokoll oeffnen', lambda: self.root.after(0, self.open_event_log)),
             TrayItem('Beenden', lambda: self.root.after(0, self._exit_from_tray)),
         )
-        self.tray_icon = pystray.Icon('udm-wan-speed-monitor', image, 'UDM WAN Speed Monitor', menu)
+        self.tray_icon = pystray.Icon('udm-wan-speed-monitor', image, self.tray_tooltip, menu)
         self.tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
         self.tray_thread.start()
 
@@ -1159,16 +1446,12 @@ class MonitorApp:
         self.exiting = True
         self.running = False
         self._stop_tray_icon()
-        self.config['options_visible'] = self.options_visible
-        self.config['always_on_top'] = bool(self.always_on_top_var.get())
-        self.config['show_wan2'] = bool(self.show_wan2_var.get())
-        self.config['autostart'] = bool(self.autostart_var.get())
-        self.config['minimize_to_tray'] = bool(self.minimize_to_tray_var.get())
-        self.config.update(self.last_window_geometry)
-        if self._has_credentials(self.config):
-            ConfigStore.save(self.config)
+        self._persist_config()
         if self.client is not None:
-            self.client.logout()
+            # Logout mit kurzem Zeitlimit, damit das Schliessen bei nicht erreichbarer UDM nicht haengt.
+            logout_thread = threading.Thread(target=self.client.logout, daemon=True)
+            logout_thread.start()
+            logout_thread.join(LOGOUT_TIMEOUT_SECONDS)
         self.root.destroy()
 
 
